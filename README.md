@@ -73,7 +73,7 @@ python pynball.py --mute              # sin audio
 
 ### Golpes a la máquina
 
-`X` y `V` son golpes laterales: la bola recibe un impulso hacia ese lado y un poco hacia arriba. `C` es el golpe desde abajo: impulso vertical fuerte, pensado para el *bang back* cuando la bola cae por un outlane. Cada golpe calienta la plomada (el de abajo más); el calor se enfría solo. Pasado el aviso, el siguiente golpe es **TILT**: flippers muertos y bonus perdido hasta la bola siguiente. La corona de lámparas bajo el arco muestra cuánto calor llevas.
+`X` y `V` son golpes laterales: la bola recibe un impulso hacia ese lado y un poco hacia arriba. `C` es el golpe desde abajo: impulso vertical fuerte, pensado para el *bang back* cuando la bola cae por un outlane; funciona si la bola entra despacio y lo das a tiempo, no rescata una bola que ya cae a toda velocidad. Cada golpe calienta la plomada (el de abajo, 1,6 veces más); el calor se enfría solo. Pasado el aviso, el siguiente golpe es **TILT**: flippers muertos y bonus perdido hasta la bola siguiente. La corona de lámparas bajo el arco muestra cuánto calor llevas.
 
 ### Trampas
 
@@ -195,15 +195,17 @@ La mesa está inclinada ~6.5°. En 2D vista cenital eso es simplemente una grave
 
 ## 6. Las mesas
 
-Todas las mesas se dibujan sobre un lienzo lógico de **540 × 960** (escalado a la ventana con `pygame.SCALED`) y comparten el **bastidor** (`Table.frame()`): arco, carril de lanzamiento con puerta de un sentido, diagonales laterales, techos que cierran los huecos tras los bancos, postes, guías de inlane tangentes al flipper en reposo, slingshots y flippers. El lado derecho es el espejo del izquierdo respecto al eje del campo (`mirror()`).
+Todas las mesas se dibujan sobre un lienzo lógico de **540 × 960** (escalado a la ventana con `pygame.SCALED`) y comparten el **bastidor** (`Table.frame()`): arco, carril de lanzamiento con puerta de un sentido, diagonales laterales, guías de outlane, postes, guías de inlane tangentes al flipper en reposo, slingshots y flippers. El lado derecho es el espejo del izquierdo respecto al eje del campo (`mirror()`).
 
-Encima, cada máquina coloca piezas de un pequeño catálogo: `top_lanes(n)`, `bumper()`, `hole()`, `side_bank()`, `spinner()`, `kickback()`, `ring_lamps()`, `meter_lamps()` y `lamp()`. Una máquina es una función de veinte líneas más una paleta y una progresión de acordes. Añadir una cuarta es copiar una de las tres.
+**Los outlanes están abiertos por arriba.** La diagonal lateral es una puerta de un sentido: desde arriba desvía la bola hacia el banco de dianas, desde abajo deja pasar. Así el disparo del kickback sube por el outlane hasta el arco, y un *bang back* bien dado puede sacar una bola del outlane, como en una máquina real. Una guía vertical tras el banco (a 14 px de las dianas, menos que el diámetro de la bola) sustituye al techo que había antes y evita el bolsillo muerto.
+
+Encima, cada máquina coloca piezas de un pequeño catálogo: `top_lanes(n)`, `bumper()`, `mini_bumper()`, `rubber()`, `hole()`, `side_bank()`, `spinner()`, `kickback()`, `ring_lamps()`, `bumper_ring()`, `meter_lamps()` y `lamp()`. Una máquina es una función de veinte líneas más una paleta y una progresión de acordes. Añadir una cuarta es copiar una de las tres.
 
 | Máquina | Lo que lleva |
 |---|---|
-| **PYNBALL** (la de siempre) | 3 carriles, 3 bumpers en triángulo, agujero a la izquierda, banco de dianas, standups P-Y-N, spinner en la órbita izquierda, kickback en el outlane izquierdo |
-| **NEBULOSA** | 4 carriles, rombo de 4 bumpers, dos agujeros bajo el arco, N-E-B a la izquierda y U-L-A a la derecha, spinner central, kickback en los dos outlanes, estrellas que parpadean |
-| **TABERNA** | 3 carriles, barril (agujero) central, campo de 23 pinchos tipo bagatela, un gran bumper abajo, dianas (botellas) y R-O-N, spinner a la derecha, kickback derecho, cartel de 5 luces |
+| **PYNBALL** (la de siempre) | 3 carriles, 3 bumpers en triángulo, 2 mini-bumpers, 5 gomas, agujero a la izquierda, banco de dianas, standups P-Y-N, spinner en la órbita izquierda, kickback en el outlane izquierdo |
+| **NEBULOSA** | 4 carriles, rombo de 4 bumpers con corona de 6 gomas, 2 mini-bumpers, dos agujeros bajo el arco, N-E-B a la izquierda y U-L-A a la derecha, spinner central, kickback en los dos outlanes, estrellas que parpadean |
+| **TABERNA** | 3 carriles, barril (agujero) central, campo de 23 pinchos tipo bagatela, un gran bumper abajo, 2 mini-bumpers, 4 gomas, dianas (botellas) y R-O-N, spinner a la derecha, kickback derecho, cartel de 5 luces |
 
 ```
    ┌──────────────────────────────┐
@@ -225,6 +227,8 @@ Elementos y puntuación (comunes a las tres):
 | Elemento | Puntos | Comportamiento |
 |---|---|---|
 | Bumper pop | 100 × combo | Kick radial de 650 px/s. Golpes seguidos sin tocar flipper suben el combo hasta x10; el medidor de lámparas lo enseña |
+| Mini-bumper | 100 × combo | Como el bumper, con el 70 % del kick |
+| Goma | 10 | Poste con restitución 0,88 y sonido de "boing" |
 | Slingshot | 50 | Kick de 520 px/s solo por la cara frontal y solo si la bola llega con velocidad |
 | Diana | 500 | Se apaga al golpearla; las tres: 5000 y se rearman en 1 s |
 | Standup con letra | 300 | Enciende su letra; completar la palabra: 3000 por banco y **enciende los kickbacks** |
@@ -239,7 +243,7 @@ Cada carril, diana y agujero suma además al **bonus** de la bola (1000, 1000, 5
 
 ### Luces
 
-Las lámparas de inserto no tienen física: son un pequeño secuenciador (`Game.update_lamps`) con un patrón de fondo por estado y persecuciones temporales por evento. En la pantalla de inicio la corona del arco gira y las flechas parpadean; jugando, las flechas señalan lo que falta por golpear, la corona muestra el calor de tilt, el medidor sube con el combo, los kickbacks encendidos parpadean y las lámparas de inlane avisan del ball save. Un banco completo, un skill shot o una bola extra lanzan un barrido doble por la corona; el tilt apaga todo.
+Las lámparas de inserto no tienen física: son un pequeño secuenciador (`Game.update_lamps`) con un patrón de fondo por estado y persecuciones temporales por evento. En la pantalla de inicio la corona del arco gira, los anillos de los bumpers titilan, los raíles laterales corren y las flechas parpadean; jugando, las flechas señalan lo que falta por golpear, la corona muestra el calor de tilt, el medidor sube con el combo, cada bumper enciende su anillo al recibir un golpe, los raíles laterales parpadean mientras hay combo, los kickbacks encendidos parpadean y las lámparas de inlane avisan del ball save. Un banco completo, un skill shot o una bola extra lanzan un barrido doble por la corona; el tilt apaga todo.
 
 ## 7. Reglas de partida
 
@@ -305,6 +309,8 @@ Sin ventana, con un bot tonto que flipa cuando la bola baja cerca y relanza cuan
 - la partida avanza: bolas 1, 2, 3, game over, multiplicador, bola extra.
 
 Tres bugs reales salieron de ahí y se arreglaron antes del primer commit del juego: la bola se quedaba en la cuna del pivote cuando el bot sujetaba el flipper (era un *trap* legítimo, se corrigió el detector de atasco, no la física); un bolsillo muerto tras cada banco de dianas al que la bola entraba desde abajo (se cerró con un techo); y un bucle agujero-bumper-agujero que daba 800 000 puntos en dos minutos (la expulsión ahora va al inlane y el agujero tiene 1,5 s sin capturar).
+
+Un cuarto bug lo encontró el usuario jugando: el kickback disparaba la bola contra el techo del outlane y volvía a caer. Se rediseñó el lateral (diagonal de un sentido y guía vertical en vez de techo) y se añadió una prueba que suelta la bola por cada outlane con el kickback encendido y exige que llegue al arco.
 
 Una segunda revisión del código completo añadió: el récord se guarda también al salir con la partida a medias, la bola extra se concede aunque el umbral se cruce con el bonus, el nombre de cada sonido que pide el juego se comprueba contra el banco, y las teclas de flipper admiten flechas y Ctrl además de Shift.
 

@@ -98,7 +98,7 @@ TILT_WARN = 1.6
 TILT_LIMIT = 2.5
 NUDGE_VX = 170.0                # px/s  impulso lateral de un golpe
 NUDGE_VY = -60.0                # px/s  todo golpe levanta un poco la bola
-NUDGE_UP_VY = 300.0             # px/s  extra del golpe desde abajo (bang back)
+NUDGE_UP_VY = 650.0             # px/s  extra del golpe desde abajo (bang back); cuesta 1,6 de calor
 
 BALLS_PER_GAME = 3
 EXTRA_BALL_SCORE = 50_000
@@ -540,10 +540,20 @@ class Table:
         self.walls.append(Wall(V(LANE_X, 345), V(515, 305), one_way=V(0, -1), name="gate", e=0.3))
         for m in (False, True):
             M = mirror if m else (lambda p: p)
-            self.polyline([M(V(20, 345)), M(V(80, 455))])
-            self.polyline([M(V(80, 611)), M(V(80, 640)), M(V(20, 640))])
+            # Diagonal de un sentido: desde arriba desvía la bola hacia el
+            # banco; desde abajo deja pasar el disparo del kickback o un
+            # bang back. Así el outlane está abierto por arriba, como en una
+            # máquina real.
+            self.walls.append(Wall(M(V(20, 345)), M(V(80, 455)), one_way=V(0, -1), name="side"))
+            # Guía del outlane: cierra el hueco tras el banco sin techo
+            self.polyline([M(V(66, 640)), M(V(66, 470)), M(V(80, 455))])
+            self.polyline([M(V(80, 611)), M(V(80, 640))])
             self.posts.append(Post(M(V(80, 640)), 2.0))
+            self.posts.append(Post(M(V(66, 640)), 2.0))
             self.posts.append(Post(M(V(65, 685)), 7.0))
+            # raíl de lámparas por el lateral
+            for k in range(6):
+                self.lamp(M(V(34, 480 + k * 60)).x, 480 + k * 60, "rail", 3.0)
             piv = M(V(152, 850))
             ang = (math.pi - FLIPPER_REST) if m else FLIPPER_REST
             d = V(math.cos(ang), math.sin(ang))
@@ -602,6 +612,23 @@ class Table:
         self.posts.append(b)
         self.bumpers.append(b)
         return b
+
+    def rubber(self, x: float, y: float, r: float = 7.0) -> Post:
+        """Poste de goma: rebote vivo y sonido propio."""
+        p = Post(Vec2(x, y), r, e=0.88, mu=0.01, name="rubber")
+        self.posts.append(p)
+        return p
+
+    def mini_bumper(self, x: float, y: float) -> Post:
+        b = self.bumper(x, y, 14.0)
+        b.kick = BUMPER_KICK * 0.7
+        return b
+
+    def bumper_ring(self, b: Post, n: int = 6) -> None:
+        """Anillo de lámparas alrededor de un bumper."""
+        for i in range(n):
+            a = math.tau * i / n
+            self.lamp(b.c.x + math.cos(a) * (b.r + 11), b.c.y + math.sin(a) * (b.r + 11), "bring", 2.5)
 
     def hole(self, x: float, y: float, eject: Vec2) -> Hole:
         h = Hole(Vec2(x, y), eject=eject)
@@ -676,25 +703,34 @@ def build_classic(t: Table) -> None:
     """La de siempre: tres carriles, tres bumpers, agujero, dianas y P-Y-N."""
     t.top_lanes(3)
     for x, y in ((177, 330), (317, 330), (247, 425)):
-        t.bumper(x, y)
+        t.bumper_ring(t.bumper(x, y))
     t.hole(105, 262, Vec2(120, 360))
     t.side_bank(False, "target")
     t.side_bank(True, "standup", "PYN")
-    t.spinner(88, 400)
+    t.spinner(108, 400)
     t.kickback(False)
     t.ring_lamps()
     t.meter_lamps(247, 560)
     for x, y in ((177, 372), (317, 372), (247, 470)):
         t.lamp(x, y, "bumper", 4.0)
+    for x, y in ((130, 520), (364, 520)):
+        t.bumper_ring(t.mini_bumper(x, y), 5)
+    for x, y in ((140, 610), (354, 610), (126, 236), (368, 236), (247, 540)):
+        t.rubber(x, y)
 
 
 def build_nebula(t: Table) -> None:
     """Nebulosa: cuatro carriles, rombo de bumpers, dos agujeros, N-E-B-U-L-A."""
     t.top_lanes(4)
     for x, y in ((247, 292), (187, 362), (307, 362), (247, 432)):
-        t.bumper(x, y, 22.0)
+        t.bumper_ring(t.bumper(x, y, 22.0))
     t.hole(88, 250, Vec2(140, 340))
     t.hole(406, 250, Vec2(-140, 340))
+    for i in range(6):                         # corona de gomas alrededor del rombo
+        a = math.tau * i / 6 + math.pi / 6
+        t.rubber(247 + math.cos(a) * 118, 362 + math.sin(a) * 118, 6.0)
+    for x, y in ((130, 560), (364, 560)):
+        t.bumper_ring(t.mini_bumper(x, y), 5)
     t.side_bank(False, "standup", "NEB")
     t.side_bank(True, "standup", "ULA")
     t.spinner(247, 540)
@@ -721,10 +757,14 @@ def build_tavern(t: Table) -> None:
         for i in range(n):
             x = PF_MID + (i - (n - 1) / 2) * 52.0
             t.posts.append(Post(Vec2(x, y), 5.0, e=0.7, name=""))
-    t.bumper(247, 560, 28.0)
+    t.bumper_ring(t.bumper(247, 560, 28.0), 8)
     t.side_bank(False, "target")
     t.side_bank(True, "standup", "RON")
-    t.spinner(402, 400)
+    t.spinner(386, 400)
+    for x, y in ((120, 560), (374, 560)):
+        t.bumper_ring(t.mini_bumper(x, y), 5)
+    for x, y in ((140, 640), (354, 640), (128, 250), (366, 250)):
+        t.rubber(x, y)
     t.kickback(True)
     t.ring_lamps(10)
     t.meter_lamps(247, 680)
@@ -838,6 +878,9 @@ class Physics:
                 if p.name == "bumper":
                     if impact > p.threshold or kick > 0:
                         self.events.append((p.name, p, max(impact, 1.0)))
+                elif p.name == "rubber":
+                    if impact > HIT_MIN:
+                        self.events.append(("rubber", p, impact))
                 elif impact > HIT_MIN:
                     self.events.append(("hit", ball.x, impact))
                 px, py = ball.x, ball.y
@@ -1165,6 +1208,7 @@ class Sounds:
         bank["start"] = [S.norm(S.mix(S.chord([57, 64, 69], 0.5, 0.0, 0.7, wave="square"), S.chord([69, 72, 76, 81, 84], 0.9, 0.08, 0.9)), 0.9)]
         bank["gameover"] = [S.norm(S.mix(S.chord([76, 72, 69, 64], 0.45, 0.22, 0.8), S.chord([45, 52, 57], 1.4, 0.0, 0.7, wave="saw")), 0.9)]
 
+        var("rubber", lambda k: S.norm(S.mix(S.osc(0.09, 420 * k, 300 * k, wave="tri") * S.env(0.09, 0.001, 0.03), S.band(S.noise(0.01), 800, 4000) * S.env(0.01, 0.0003, 0.003) * 0.5), 0.6))
         var("spin", lambda k: S.norm(S.mix(S.band(S.noise(0.012), 2500, 9000) * S.env(0.012, 0.0003, 0.003), S.modal(0.05, 3200 * k, S.METAL) * 0.6), 0.45), 3)
         var("kickback", lambda k: S.norm(S.mix(S.solenoid(100 * k, 14, 1.0), S.osc(0.3, 180 * k, 720 * k, wave="saw") * S.env(0.3, 0.004, 0.08) * 0.6), 0.9), 2)
         bank["select"] = [S.norm(S.mix(S.osc(0.08, 660, wave="square") * S.env(0.08, 0.002, 0.03), S.osc(0.12, 990, wave="square") * S.env(0.12, 0.002, 0.04) * 0.6, at=[0.0, 0.06]), 0.5)]
@@ -1558,7 +1602,7 @@ class Game:
             return
         if self.ball.in_lane() and not self.cheat:
             return
-        heat = TILT_HEAT_PER_NUDGE * (1.4 if dy else 1.0)
+        heat = TILT_HEAT_PER_NUDGE * (1.6 if dy else 1.0)
         if not self.tilt_immune:
             self.tilt_heat += heat
         b = self.ball
@@ -1682,7 +1726,7 @@ class Game:
                     self.snd.play("bumper_note", obj.c.x, 0.55, index=min(self.combo, 10) - 1)
                     self.spawn_particles(obj.c.x, obj.c.y, 10, self.pal["bumper_lit"])
                     for lp in self.table.lamps:
-                        if lp.group == "bumper":
+                        if lp.group == "bumper" or (lp.group == "bring" and math.hypot(lp.c.x - obj.c.x, lp.c.y - obj.c.y) < obj.r + 14):
                             lp.phase = self.time
                     if self.combo >= 5 and self.combo % 5 == 0:
                         self.say(f"COMBO x{self.combo}", 0.8)
@@ -1769,6 +1813,11 @@ class Game:
                     self.flash = 0.2
                     self.light_show("flash", 0.5)
                     self.after(1.2, lambda h=obj: self.eject(h))
+                case "rubber":
+                    assert isinstance(obj, Post)
+                    obj.flash = 0.12
+                    self.add_score(10)
+                    self.snd.play("rubber", obj.c.x, clamp(impact / 1200.0, 0.3, 1.0))
                 case "spinner":
                     assert isinstance(obj, Spinner)
                     obj.flash = 0.15
@@ -1977,6 +2026,10 @@ class Game:
                 on = (int(t * 8) + int(lp.c.y)) % 3 == 0 if (attract or show) else (self.time < self.ball_save_until and blink)
             elif g == "star":
                 on = (math.sin(t * 2.0 + lp.phase * 20) > 0.6)
+            elif g == "bring":
+                on = (t - lp.phase) < 0.3 or (attract and (t * 2 + lp.phase) % 1.0 < 0.15)
+            elif g == "rail":
+                on = (int(t * 10) + int(lp.c.y / 60)) % 6 == 0 if (attract or show) else (combo_level > 0 and blink)
             elif g == "sign":
                 on = (int(t * 5) % 5) == int(lp.phase * 5) % 5 if attract else blink or self.multiplier > 1
             lp.on = on
@@ -2128,7 +2181,7 @@ class Renderer:
             if w.name in ("target", "standup", "sling"):
                 continue
             col, width = pal["wall"], 3
-            if w.name == "gate":
+            if w.name in ("gate", "side"):
                 col, width = pal["wall_dim"], 2
             elif w.name == "lane_divider":
                 width = 4
@@ -2188,6 +2241,9 @@ class Renderer:
                 pygame.draw.circle(s, mix(pal["bumper"], pal["field"], 0.6), P(p.c), rr + 4)
                 pygame.draw.circle(s, col, P(p.c), p.r)
                 pygame.draw.circle(s, pal["bumper_lit"], P(p.c), p.r * 0.45)
+            elif p.name == "rubber":
+                pygame.draw.circle(s, mix(pal["sling"], (255, 255, 255), p.flash * 6), P(p.c), p.r)
+                pygame.draw.circle(s, pal["wall"], P(p.c), p.r, 2)
             else:
                 pygame.draw.circle(s, pal["wall"], P(p.c), p.r)
                 if p.r >= 5:
