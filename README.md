@@ -286,3 +286,9 @@ Si alguna de estas se vuelve necesaria, probablemente el proyecto ya no debería
 - [bcd/freewpc](https://github.com/bcd/freewpc) — framework para máquinas reales WPC.
 - [rtrussell/BBCSDL](https://github.com/rtrussell/BBCSDL) — `pinball.bbc`, sonido por envolventes.
 - [GitHub topic pinball en C](https://github.com/topics/pinball?l=c)
+
+---
+
+## Licencia
+
+[MIT](LICENSE). Úsalo, cópialo, rómpelo.
