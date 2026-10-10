@@ -49,6 +49,8 @@ Modo sin ventana para pruebas y CI:
 
 ```bash
 python pynball.py --headless 3000     # simula 3000 frames con un bot tonto y sale
+python pynball.py --dump-sounds out/  # vuelca los 78 sonidos sintetizados a WAV
+python pynball.py --mute              # sin audio
 ```
 
 ---
@@ -62,6 +64,8 @@ python pynball.py --headless 3000     # simula 3000 frames con un bot tonto y sa
 | `Espacio` (mantener) | Cargar plunger; soltar lanza |
 | `X`, `C`, `V` | Nudge izquierda, abajo, derecha. Tres seguidos: **TILT** |
 | Flipper (al pulsar) | Rota las luces de los carriles superiores (lane change) |
+| `M` | Música sí / no |
+| `←` / `→`, `Ctrl` | Alternativas para los flippers |
 | `R` | Nueva partida |
 | `F1` | Mostrar colisionadores y vectores de velocidad |
 | `P` | Pausa |
@@ -84,7 +88,7 @@ pynball.py
 ├── 4. Ball: posición, velocidad, bounce() con corrección posicional y reflexión
 ├── 5. Table + build_table(): la mesa escrita a mano, lado izquierdo y su espejo
 ├── 6. Physics.substep(): integración, broad-phase por AABB, contactos, eventos
-├── 7. Sounds: síntesis de ondas en memoria (numpy) con fallback silencioso
+├── 7. Synth + Sounds: síntesis modal y de solenoide, rodadura, música, paneo
 ├── 8. Game: reglas, puntuación, timers, tilt, máquina de estados, entrada
 ├── 9. Renderer: mesa, luces, bola con estela, partículas, HUD, modo debug
 └── 10. main(): bucle con acumulador de tiempo fijo, modo --headless
@@ -224,22 +228,25 @@ ATTRACT ──(R)──► PLAYING ──(bola al desagüe)──► BALL_LOST
 
 ## 8. Sonido
 
-Sin ficheros. Al arrancar se sintetizan en memoria con numpy unos pocos buffers de 16 bits:
+Sin ficheros. Todo se sintetiza al arrancar con numpy en menos de 0,2 s: 78 buffers, tres variantes desafinadas de cada golpe para que no canse, paneo estéreo según la posición en la mesa, y volumen que sigue la velocidad de impacto.
 
-| Sonido | Síntesis |
-|---|---|
-| Flipper | Click: ruido blanco, 30 ms, envolvente exponencial |
-| Bumper | Seno 330→120 Hz, 90 ms, más un transitorio de ruido |
-| Slingshot | Triángulo 520→400 Hz, 70 ms |
-| Diana | Dos senos en quinta (660 + 990 Hz), 140 ms |
-| Rollover | Seno ascendente 880→1320 Hz |
-| Desagüe | Barrido descendente 800→90 Hz, 450 ms |
-| Tilt | Onda cuadrada 110 Hz troceada a 12 Hz, 600 ms |
-| Bonus, multiplicador, extra ball | Acordes y barridos ascendentes |
+**El modelo.** Un pinball suena a mecánica más electrónica, y las dos capas se sintetizan distinto:
 
-Cada buffer se genera una vez con numpy, se convierte a 16 bits y se duplica a estéreo si el mixer lo pide. Si `numpy` no está disponible o `pygame.mixer` falla al inicializar, `play()` es una función vacía. El juego nunca debe morir por el audio.
+| Capa | Técnica | Dónde |
+|---|---|---|
+| Solenoide | Ráfaga de ruido filtrada por FFT (12 ms) + golpe grave 90→55 Hz + click metálico | Flippers, bumpers, slingshots, expulsión del agujero, lanzamiento |
+| Acero contra metal | Síntesis modal: parciales inarmónicos (1 : 1,71 : 2,63 : 4,11) que decaen en 30 ms | Toques contra paredes y postes, con volumen según la velocidad y uno cada 35 ms como máximo |
+| Rodadura | Ruido marrón filtrado en bucle de 1 s; al filtrar por FFT la señal es periódica y el bucle no tiene costura | Canal reservado; el volumen sigue la velocidad de la bola con suavizado |
+| Campanas | Modal con parciales de campana (1 : 2 : 2,76 : 5,4 : 8,9) sobre pentatónica de La menor | Dianas, standups, rollovers, cuenta del bonus |
+| Combo | El bumper suena a solenoide y además a una nota: cada golpe seguido sube un grado de la escala | Bumpers |
+| Jingles | Acordes arpegiados con triángulo y octava | Inicio, banco completo, multiplicador, skill shot, extra ball, game over |
+| Música | Bucle de 4 compases a 112 BPM (Am F C G): bajo de sierra filtrado, arpegio de triángulo, bombo, caja y charles. Lo que sobresale del final se pliega al principio | Canal reservado, `M` para apagar |
 
----
+**Detalles que se oyen.** El plunger hace clic de trinquete cada octavo de carga. Al perder bola, el bonus se cuenta a golpes con campanas ascendentes, como una electromecánica. El tilt es un zumbido troceado. Si el flipper golpea la bola, suena un "whack" distinto del clack del solenoide, más fuerte cuanto más rápido.
+
+**Por qué FFT para filtrar.** No hay scipy y un filtro IIR en bucle de Python sobre 22 050 muestras es lento. Multiplicar el espectro por una máscara con bordes suaves es vectorizado, exacto y además deja los bucles sin costura. Es el truco que hace viable todo el sistema en numpy puro.
+
+Si `numpy` no está disponible o `pygame.mixer` falla al inicializar, `play()` es una función vacía. El juego nunca debe morir por el audio.
 
 ## 9. Render
 
@@ -261,6 +268,8 @@ Sin ventana, con un bot tonto que flipa cuando la bola baja cerca y relanza cuan
 - la partida avanza: bolas 1, 2, 3, game over, multiplicador, bola extra.
 
 Tres bugs reales salieron de ahí y se arreglaron antes del primer commit del juego: la bola se quedaba en la cuna del pivote cuando el bot sujetaba el flipper (era un *trap* legítimo, se corrigió el detector de atasco, no la física); un bolsillo muerto tras cada banco de dianas al que la bola entraba desde abajo (se cerró con un techo); y un bucle agujero-bumper-agujero que daba 800 000 puntos en dos minutos (la expulsión ahora va al inlane y el agujero tiene 1,5 s sin capturar).
+
+Una segunda revisión del código completo añadió: el récord se guarda también al salir con la partida a medias, la bola extra se concede aunque el umbral se cruce con el bonus, el nombre de cada sonido que pide el juego se comprueba contra el banco, y las teclas de flipper admiten flechas y Ctrl además de Shift.
 
 ---
 
