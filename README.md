@@ -2,7 +2,12 @@
 
 Un pinball completo en **un solo fichero**: `pynball.py`. Python moderno, `pygame-ce`, cero motor de física externo. Pensado para leerse de arriba abajo en una tarde, como `winball` en C, pero con las lecciones de los pinballs grandes.
 
-Este README es el documento de diseño: qué se construye, por qué así, y qué se roba de cada referencia. Se escribe **antes** del código para que el código no se desvíe.
+Este README es el documento de diseño y la guía de lectura del código: qué se construye, por qué así, y qué se toma de cada referencia. Se escribió antes del código, y se ha ajustado después en los puntos donde el código enseñó algo.
+
+```bash
+pip install pygame-ce numpy
+python pynball.py
+```
 
 ---
 
@@ -10,9 +15,10 @@ Este README es el documento de diseño: qué se construye, por qué así, y qué
 
 **Es**
 
-- Un juego jugable: plunger, dos flippers, bumpers, slingshots, dianas, rampa de lanzamiento, desagüe, 3 bolas, puntuación y récord.
-- Un único `pynball.py` de ~800-1200 líneas, sin assets externos. Sonido generado por síntesis, mesa definida como datos dentro del propio fichero.
-- Física propia: bola circular contra segmentos, arcos y flippers rotatorios. Legible, determinista, sin dependencias.
+- Un juego jugable: plunger, dos flippers, tres bumpers pop, dos slingshots, banco de dianas, banco de standups P-Y-N, tres carriles superiores con rollovers, agujero kickout, órbita, inlanes y outlanes, desagüe, 3 bolas, bola extra, skill shot, combos, ball save, tilt, puntuación y récord.
+- Un único `pynball.py` de ~1.300 líneas, sin assets externos. Sonido generado por síntesis, mesa definida como datos dentro del propio fichero.
+- Física propia: bola circular contra segmentos, arcos y flippers rotatorios con velocidad de superficie. Legible, determinista, sin dependencias.
+- Rápido: la simulación completa a 960 Hz consume ~1 % de un núcleo. Un minuto de juego se simula en medio segundo sin ventana.
 
 **No es**
 
@@ -39,6 +45,12 @@ python pynball.py
 
 Linux, macOS y Windows. En Linux con Wayland, si la ventana no abre, exporta `SDL_VIDEODRIVER=x11`.
 
+Modo sin ventana para pruebas y CI:
+
+```bash
+python pynball.py --headless 3000     # simula 3000 frames con un bot tonto y sale
+```
+
 ---
 
 ## 3. Controles
@@ -48,7 +60,8 @@ Linux, macOS y Windows. En Linux con Wayland, si la ventana no abre, exporta `SD
 | `Shift Izq` / `Z` | Flipper izquierdo |
 | `Shift Der` / `/` | Flipper derecho |
 | `Espacio` (mantener) | Cargar plunger; soltar lanza |
-| `X`, `C`, `V` | Nudge izquierda, abajo, derecha. Tres nudges en 2 s: **TILT** |
+| `X`, `C`, `V` | Nudge izquierda, abajo, derecha. Tres seguidos: **TILT** |
+| Flipper (al pulsar) | Rota las luces de los carriles superiores (lane change) |
 | `R` | Nueva partida |
 | `F1` | Mostrar colisionadores y vectores de velocidad |
 | `P` | Pausa |
@@ -62,23 +75,24 @@ Un fichero, pero con secciones numeradas y separadas por banners de comentario. 
 
 ```
 pynball.py
-├── 0. Cabecera: docstring, imports, constantes (tamaño, gravedad, dt)
-├── 1. Vec2: dataclass mínima con +, -, *, dot, cross, length, normalized, rotated
-├── 2. Geometría de colisión: funciones puras
-│      closest_point_on_segment, circle_vs_segment, circle_vs_circle, circle_vs_arc
-├── 3. Elementos de mesa (dataclasses)
-│      Wall, Arc, Bumper, Slingshot, Target, Flipper, Plunger, Drain, Lane
-├── 4. Ball: posición, velocidad, radio, integración, respuesta a colisión
-├── 5. Table: lista de elementos + rutina build_table() que la construye a mano
-├── 6. Física: step(dt) con substeps, resolución de colisiones, fricción, restitución
-├── 7. Reglas: puntuación, bolas, bonus, tilt, multiplicador, extra ball
-├── 8. Sonido: síntesis de ondas en memoria (numpy) con fallback silencioso
-├── 9. Render: dibujar mesa, bola, HUD, modo debug
-├── 10. Game: máquina de estados (ATTRACT, PLAYING, BALL_LOST, GAME_OVER) y bucle principal
-└── 11. if __name__ == "__main__": main()
+├── 0. Constantes de afinado (gravedad, dt, restituciones, velocidades, paleta)
+├── 1. Vec2 (inmutable, para construir y dibujar) y utilidades clamp/lerp/mix
+├── 2. Geometría de colisión: funciones puras sobre floats
+│      circle_vs_segment, circle_vs_circle, circle_vs_arc_inside
+├── 3. Elementos de mesa (dataclasses con slots)
+│      Wall, Post, Arc, Sensor, Hole, Flipper
+├── 4. Ball: posición, velocidad, bounce() con corrección posicional y reflexión
+├── 5. Table + build_table(): la mesa escrita a mano, lado izquierdo y su espejo
+├── 6. Physics.substep(): integración, broad-phase por AABB, contactos, eventos
+├── 7. Sounds: síntesis de ondas en memoria (numpy) con fallback silencioso
+├── 8. Game: reglas, puntuación, timers, tilt, máquina de estados, entrada
+├── 9. Renderer: mesa, luces, bola con estela, partículas, HUD, modo debug
+└── 10. main(): bucle con acumulador de tiempo fijo, modo --headless
 ```
 
 **Por qué un solo fichero.** Es la restricción que impone claridad. `winball` cabe en pocos ficheros de C porque no tiene abstracciones que no necesite. Un pinball no es un proyecto grande: es un problema de física 2D con reglas encima. Si no cabe en un fichero, hay abstracción sobrante.
+
+**Por qué floats sueltos en la física.** `Vec2` es cómodo, pero cada operación asigna un objeto. A 960 Hz con ~40 colisionadores son cientos de miles de asignaciones por segundo. Las funciones de la sección 2 reciben y devuelven floats; `Ball` guarda `x, y, vx, vy`. Es el único sitio donde se sacrifica elegancia por velocidad, y se dice explícitamente.
 
 ---
 
@@ -90,10 +104,10 @@ Esta es la sección que justifica el proyecto. Lo que sigue es lo que enseña le
 
 ```
 FIXED_DT = 1 / 120          # física a 120 Hz
-SUBSTEPS = 4                # 4 subpasos por frame de física = 480 Hz efectivos
+SUBSTEPS = 8                # 8 subpasos por frame de física = 960 Hz efectivos
 ```
 
-Una bola de pinball a velocidad alta recorre varios píxeles por frame. Si se integra a 60 Hz sin más, atraviesa paredes finas y flippers. Space Cadet resuelve esto con detección continua: calcula el tiempo exacto de impacto dentro del frame. Es más correcto pero el código se dispara. Los substeps son la solución barata que mantiene todo legible: cuatro integraciones pequeñas por frame y una comprobación de solapamiento tras cada una. Para una bola de radio 8 px y velocidad máxima 1500 px/s, cuatro substeps a 120 Hz dan un desplazamiento de ~3 px por subpaso, menor que el radio. Suficiente.
+Una bola de pinball a velocidad alta recorre varios píxeles por frame. Si se integra a 60 Hz sin más, atraviesa paredes finas y flippers. Space Cadet resuelve esto con detección continua: calcula el tiempo exacto de impacto dentro del frame. Es más correcto pero el código se dispara. Los substeps son la solución barata que mantiene todo legible: ocho integraciones pequeñas por frame y una comprobación de solapamiento tras cada una. Con bola de radio 9 px y velocidad máxima 2400 px/s, el desplazamiento por subpaso es 2,5 px, muy por debajo del radio. En doce partidas simuladas de dos minutos la bola no salió de la mesa ni una vez.
 
 Acumulador de tiempo clásico: el render va a lo que dé la pantalla, la física avanza en pasos fijos. Determinismo gratis.
 
@@ -107,34 +121,36 @@ Solo tres: **bola contra segmento**, **bola contra círculo**, **bola contra arc
 - Flippers: un segmento que rota alrededor de su pivote, con un círculo en cada extremo. Es exactamente lo que hace Space Cadet (`TFlipperEdge`): la cápsula es un segmento gordo.
 - Slingshots: segmento con restitución alta y kick fijo en la normal.
 
-Respuesta a colisión en dos pasos y siempre en este orden:
+Respuesta a colisión en `Ball.bounce()`, en dos pasos y siempre en este orden:
 
 1. **Corrección posicional**: sacar la bola fuera del sólido a lo largo de la normal, exactamente la penetración más un epsilon. Sin esto la bola "tiembla" dentro de las paredes.
-2. **Reflexión de velocidad**: descomponer en normal y tangencial. Normal invertida y escalada por restitución del elemento. Tangencial escalada por `(1 - fricción)`.
+2. **Reflexión de velocidad** relativa a la superficie: descomponer en normal y tangencial. Si la velocidad normal es pequeña (`REST_VN`) no hay rebote, hay apoyo: se anula la normal y la tangencial pierde una fricción de rodadura mínima. Si es un impacto, la normal se invierte y escala por la restitución del elemento, la tangencial por `(1 - fricción)`, y se suma el `kick` del elemento si lo tiene.
 
 ```python
 vn = v.dot(n)
 if vn < 0:                       # solo si se acerca
     vt = v - n * vn
-    v = vt * (1 - mu) - n * vn * e
+    v = vt * (1 - mu) - n * vn * e + n * kick
 ```
+
+Distinguir apoyo de impacto es lo que permite que la bola ruede por un inlane sin perder energía en 960 microrrebotes por segundo.
 
 ### 5.3 Flippers: lo único difícil de verdad
 
 Un flipper no es una pared que se mueve. Golpea. La bola tiene que salir con la velocidad del punto del flipper que la toca, no solo rebotar.
 
-Modelo:
+Modelo (`Flipper.collide`):
 
-- El flipper es un segmento desde el pivote hasta la punta, con ángulo `theta` entre `rest` y `up`.
-- Velocidad angular `omega` fija cuando sube (~30 rad/s) y algo menor cuando baja.
-- Al colisionar, la velocidad del punto de contacto es `omega × r` (perpendicular al radio desde el pivote, módulo `omega * |r|`). Se resta de la velocidad de la bola antes de reflejar y se suma después. Eso es lo que da el tiro fuerte en la punta y flojo en la base, como en una máquina real.
-- Mientras el flipper está arriba y quieto, es una pared inclinada normal: la bola rueda por él. Es lo que permite "cazar" la bola.
+- El flipper es una cápsula cónica: segmento desde el pivote hasta la punta, radio 10 px en la base y 7 px en la punta, con ángulo entre `rest` y `up`.
+- Velocidad angular fija cuando sube (26 rad/s) y menor cuando baja (16 rad/s). La velocidad angular real de cada subpaso se mide como `(ángulo nuevo - viejo) / dt`, como hace winball.
+- Al colisionar, la velocidad del punto de contacto es `omega × r` (perpendicular al radio desde el pivote). Se resta de la velocidad de la bola antes de reflejar y se suma después. Eso da el tiro fuerte en la punta y flojo en la base, como en una máquina real, y es el equivalente del `boost` proporcional a la distancia al pivote que usa Space Cadet.
+- Mientras el flipper está arriba y quieto, es una pared inclinada normal: la bola rueda por él. Si llega por el inlane con el flipper levantado, se queda atrapada en la cuna del pivote hasta que lo sueltas. Es un *trap* de verdad, no un bug: el detector de bola atascada no actúa mientras haya un flipper pulsado.
 
-Lo que **no** se hace: barrido angular continuo del flipper por subpaso. Con 480 Hz efectivos y un flipper que tarda ~50 ms en subir, el salto angular por subpaso es ~0.06 rad. Tolerable. Space Cadet lo hace mejor; nosotros lo hacemos legible.
+Lo que **no** se hace: barrido angular continuo del flipper por subpaso. A 960 Hz el salto angular por subpaso es 0.027 rad y la punta se mueve 2,3 px. Space Cadet lo hace mejor; nosotros lo hacemos legible.
 
 ### 5.4 Gravedad e inclinación
 
-La mesa está inclinada ~6.5°. En 2D vista cenital eso es simplemente una gravedad hacia abajo de `g * sin(6.5°)`. Con `g = 9.81 m/s²` y una escala de ~1 m = 1000 px, sale `GRAVITY ≈ 1100 px/s²`. Se ajusta a ojo hasta que la bola "pese" bien. Es un parámetro de diseño, no de física.
+La mesa está inclinada ~6.5°. En 2D vista cenital eso es simplemente una gravedad hacia abajo de `g * sin(6.5°)`. Con `g = 9.81 m/s²` y una escala de ~1 m = 860 px, sale `GRAVITY ≈ 950 px/s²`. Se dejó en 1150 porque así la bola "pesa" bien. Es un parámetro de diseño, no de física.
 
 ### 5.5 Lo que se roba de cada referencia
 
@@ -145,39 +161,43 @@ La mesa está inclinada ~6.5°. En 2D vista cenital eso es simplemente una grave
 | **Pokemon-Pinball / CITM-UPC (Box2D)** | Confirman por contraste la decisión: con Box2D el 60 % del código es glue entre el motor y el juego. Sin Box2D, ese 60 % es la física misma, y esa es la parte interesante de leer. Se copia de ellos el tratamiento de los sensores (zonas que puntúan sin colisión física). |
 | **BBC BASIC pinball** | El sonido sintetizado con envolventes en vez de samples. Y la prueba de que una mesa parcial pero bien afinada es más divertida que una completa y floja. |
 | **FreeWPC** | Vocabulario y reglas de máquina real: *trough* (depósito de bolas), *ball save*, *tilt warnings*, *bonus* al perder bola. pynball implementa un subconjunto pequeño y correcto. |
-| **flipper-zero-pinball** | La disciplina de un target con pocos recursos. Nada de allocar por frame: todas las listas de elementos se construyen una vez. |
+| **flipper-zero-pinball** | La disciplina de un target con pocos recursos. Nada de allocar por frame: todas las listas de elementos se construyen una vez. De ahí vienen también el `nudge_heat` con decaimiento y el combo de bumpers. |
 
 ---
 
 ## 6. La mesa
 
-Definida en `build_table()` como lista de elementos, coordenadas en píxeles sobre un lienzo lógico de **540 × 960** (escalado a la ventana). Nada de cargar ficheros: cambiar la mesa es editar Python.
+Definida en `build_table()` como lista de elementos, coordenadas en píxeles sobre un lienzo lógico de **540 × 960** (escalado a la ventana con `pygame.SCALED`). Nada de cargar ficheros: cambiar la mesa es editar Python. El lado derecho es el espejo del izquierdo respecto al eje del campo de juego (`mirror()`), así que cada elemento lateral se escribe una vez.
 
 ```
-   ┌─────────────────────────────┐
-   │   ╭───────────────────╮  ║  │  ← arco superior, carril de lanzamiento (║)
-   │   │   (B)   (B)       │  ║  │  ← 3 bumpers pop
-   │   │      (B)          │  ║  │
-   │   │  ▐▌ ▐▌ ▐▌         │  ║  │  ← dianas (drop targets)
-   │   │                   │  ║  │
-   │   │  ◢           ◣    │  ║  │  ← slingshots
-   │   │   ╲         ╱     │     │
-   │   │    ╲  ___  ╱      │  ●  │  ← plunger
-   │   │    ◣ ╱   ╲ ◢      │     │  ← flippers
-   │   │      ▽▽▽▽▽        │     │  ← desagüe
-   └─────────────────────────────┘
+   ┌──────────────────────────────┐
+   │   ╭────┬──┬──┬────╮       ║  │  ← arco, 3 carriles con rollovers, carril de lanzamiento (║)
+   │   │ ○                │  ⟋  ║  │  ← agujero kickout; puerta de un sentido a la salida del carril
+   │   │   (B)   (B)      │     ║  │  ← 3 bumpers pop
+   │   │      (B)         │     ║  │
+   │   │ ▐              ▌ │     ║  │  ← banco de 3 dianas (izq) y 3 standups P-Y-N (der)
+   │   │ ▔              ▔ │     ║  │  ← techo que cierra el hueco tras cada banco
+   │   │ •  ◢        ◣  • │     ║  │  ← postes, slingshots; fuera de ellos, los outlanes
+   │   │  ╲            ╱  │     ║  │  ← guías de inlane, tangentes al flipper en reposo
+   │   │   ◣ ╱      ╲ ◢   │  ●  │  ← flippers; plunger
+   │   │      ▽▽▽▽▽▽      │     │  ← desagüe
+   └──────────────────────────────┘
 ```
 
 Elementos y puntuación:
 
 | Elemento | Puntos | Comportamiento |
 |---|---|---|
-| Bumper pop | 100 | Kick radial de 600 px/s, parpadea 100 ms |
-| Slingshot | 50 | Kick en la normal, 400 px/s |
-| Drop target | 500 | Se hunde al golpearlo; los tres caídos: 5000 y se levantan |
-| Carril lateral | 1000 | Sensor; enciende luz de carril |
-| Rollover superior | 250 | Tres luces; completar el banco sube el multiplicador |
+| Bumper pop | 100 × combo | Kick radial de 650 px/s. Golpes seguidos sin tocar flipper suben el combo hasta x10 |
+| Slingshot | 50 | Kick de 520 px/s solo por la cara frontal y solo si la bola llega con velocidad |
+| Diana (banco izq.) | 500 | Se apaga al golpearla; las tres: 5000 y se rearman en 1 s |
+| Standup P-Y-N (der.) | 300 | Enciende su letra; las tres: 3000 |
+| Rollover superior | 250 | Enciende su luz; las tres: multiplicador +1 (máx. x5), después 10 000 |
+| Skill shot | 5000 | Al lanzar parpadea un carril; si la bola entra por él en 4 s |
+| Agujero kickout | 1000 × visita | Captura la bola si pasa despacio, la retiene 1,2 s y la expulsa al inlane izquierdo |
 | Desagüe | — | Pierde bola, suma bonus × multiplicador |
+
+Cada carril, diana y agujero suma además al **bonus** de la bola (1000, 1000, 500 y 2000 respectivamente).
 
 ---
 
@@ -193,10 +213,11 @@ ATTRACT ──(R)──► PLAYING ──(bola al desagüe)──► BALL_LOST
 ```
 
 - 3 bolas por partida.
-- **Ball save**: los primeros 5 s tras lanzar, perder la bola la devuelve al plunger sin coste.
-- **Tilt**: tres nudges en menos de 2 s apagan los flippers hasta que la bola se pierde. Warning visual al segundo nudge.
-- **Bonus**: cada carril y rollover suma 1000 al bonus; al perder bola, `bonus × multiplicador` se añade y el bonus se reinicia. El multiplicador (1x-5x) se mantiene durante la partida.
+- **Ball save**: los primeros 6 s tras lanzar, perder la bola la devuelve al plunger sin coste.
+- **Tilt**: cada nudge suma 1 de calor, que decae a 0,55/s. Por encima de 1,6 avisa; por encima de 2,5 apaga los flippers y el bonus hasta que la bola se pierde. Es el esquema de Space Cadet (`nudge_count`) con los números de flipper-zero-pinball.
+- **Bonus**: al perder bola, `bonus × multiplicador` se añade y el bonus se reinicia. El multiplicador (1x-5x) se mantiene durante la partida.
 - **Extra ball** a los 50 000 puntos. Una por partida.
+- **Bola atascada**: si lleva 2,5 s casi quieta fuera del carril y sin ningún flipper pulsado, recibe un empujón aleatorio.
 - Récord guardado en `~/.pynball_hiscore` como un entero en texto plano. Si no se puede escribir, se ignora en silencio.
 
 ---
@@ -207,40 +228,39 @@ Sin ficheros. Al arrancar se sintetizan en memoria con numpy unos pocos buffers 
 
 | Sonido | Síntesis |
 |---|---|
-| Flipper | Click: ruido blanco, 15 ms, envolvente exponencial |
-| Bumper | Seno 220 Hz con caída rápida de pitch, 80 ms |
-| Slingshot | Triángulo 440 Hz, 60 ms |
-| Diana | Dos senos en quinta, 120 ms |
-| Desagüe | Barrido descendente 800→100 Hz, 400 ms |
-| Tilt | Onda cuadrada 110 Hz entrecortada, 600 ms |
+| Flipper | Click: ruido blanco, 30 ms, envolvente exponencial |
+| Bumper | Seno 330→120 Hz, 90 ms, más un transitorio de ruido |
+| Slingshot | Triángulo 520→400 Hz, 70 ms |
+| Diana | Dos senos en quinta (660 + 990 Hz), 140 ms |
+| Rollover | Seno ascendente 880→1320 Hz |
+| Desagüe | Barrido descendente 800→90 Hz, 450 ms |
+| Tilt | Onda cuadrada 110 Hz troceada a 12 Hz, 600 ms |
+| Bonus, multiplicador, extra ball | Acordes y barridos ascendentes |
 
-Si `numpy` no está disponible o `pygame.mixer` falla al inicializar, `play()` es una función vacía. El juego nunca debe morir por el audio.
+Cada buffer se genera una vez con numpy, se convierte a 16 bits y se duplica a estéreo si el mixer lo pide. Si `numpy` no está disponible o `pygame.mixer` falla al inicializar, `play()` es una función vacía. El juego nunca debe morir por el audio.
 
 ---
 
 ## 9. Render
 
-- `pygame.Surface` lógica de 540×960, escalada al tamaño de la ventana con `smoothscale` solo si el factor no es entero; si lo es, `scale` para mantener los píxeles duros.
-- Mesa dibujada con primitivas (`draw.line`, `draw.circle`, `draw.arc`, `draw.polygon`). Sin sprites.
-- Paleta de 6 colores definida como constantes. Un pinball vive de las luces: los elementos "encendidos" cambian de color, nada más.
-- HUD en la banda superior: puntuación, bola actual, multiplicador, bonus, récord. Fuente del sistema vía `pygame.font.SysFont`.
-- Modo `F1`: dibuja cada colisionador en verde, las normales en amarillo, el vector velocidad de la bola en rojo. Imprescindible para afinar la mesa.
+- `pygame.Surface` lógica de 540×960; `pygame.SCALED | RESIZABLE` deja a SDL el escalado a la ventana.
+- Mesa dibujada con primitivas (`draw.line`, `draw.circle`, `draw.polygon`). Sin sprites.
+- Paleta de constantes al principio del fichero. Un pinball vive de las luces: los elementos "encendidos" cambian de color con `mix()` según su `flash`, nada más.
+- Estela de la bola, partículas en bumpers y slingshots, sacudida de pantalla al hacer nudge, destello en skill shot y extra ball.
+- HUD en la banda superior: puntuación, bolas restantes, multiplicador, bonus, récord, estado de ball save y tilt. Fuente por defecto de pygame.
+- Modo `F1`: dibuja cada colisionador en verde, las normales en amarillo, el vector velocidad de la bola en rojo, y velocidad, posición y calor de tilt en texto. Imprescindible para afinar la mesa.
 
 ---
 
-## 10. Plan de construcción
+## 10. Cómo se probó
 
-Orden de implementación con un criterio de "jugable al final de cada paso":
+Sin ventana, con un bot tonto que flipa cuando la bola baja cerca y relanza cuando vuelve al plunger. Doce semillas, dos minutos simulados cada una, comprobando en cada frame:
 
-1. **Bola y paredes.** Vec2, geometría, Ball, cuatro paredes, gravedad. La bola cae y rebota. Modo debug desde el primer día.
-2. **Flippers.** El paso que más se itera. Hasta que no se sienten bien, nada más.
-3. **Plunger y carril.** Carga proporcional al tiempo pulsado, arco superior que lleva la bola a la mesa.
-4. **Bumpers y slingshots.** Primeros puntos. Primer sonido.
-5. **Dianas, carriles, rollovers.** Sensores y banco de dianas.
-6. **Reglas.** Estados, bolas, tilt, bonus, récord.
-7. **Pulido.** Luces, attract mode, afinado de restituciones y gravedad.
+- la bola nunca sale del rectángulo de la mesa ni entra en un slingshot;
+- la bola nunca queda detrás de un banco de dianas ni se cuela en el carril por la puerta;
+- la partida avanza: bolas 1, 2, 3, game over, multiplicador, bola extra.
 
-Cada paso se cierra con un commit. El fichero se mantiene ejecutable en todo momento.
+Tres bugs reales salieron de ahí y se arreglaron antes del primer commit del juego: la bola se quedaba en la cuna del pivote cuando el bot sujetaba el flipper (era un *trap* legítimo, se corrigió el detector de atasco, no la física); un bolsillo muerto tras cada banco de dianas al que la bola entraba desde abajo (se cerró con un techo); y un bucle agujero-bumper-agujero que daba 800 000 puntos en dos minutos (la expulsión ahora va al inlane y el agujero tiene 1,5 s sin capturar).
 
 ---
 
@@ -249,19 +269,21 @@ Cada paso se cierra con un commit. El fichero se mantiene ejecutable en todo mom
 Todas juntas al principio del fichero, con el valor inicial y el rango razonable en comentario. Son las que se tocan jugando con `F1` activado:
 
 ```python
-GRAVITY        = 1100.0   # px/s²      [800 .. 1600]
-BALL_RADIUS    = 8.0      # px
-BALL_MAX_SPEED = 1800.0   # px/s       limitar evita túneles en picos
-WALL_E         = 0.55     # restitución [0.3 .. 0.8]
-WALL_MU        = 0.02     # fricción tangencial
-BUMPER_KICK    = 600.0    # px/s
-SLING_KICK     = 400.0    # px/s
-FLIPPER_OMEGA  = 30.0     # rad/s      [20 .. 40]
-FLIPPER_REST   = -0.45    # rad, ángulo en reposo respecto a la horizontal
-FLIPPER_UP     =  0.55    # rad
-PLUNGER_MAX    = 1400.0   # px/s, a carga completa
-BALL_SAVE_S    = 5.0
-TILT_WINDOW_S  = 2.0
+GRAVITY           = 1150.0   # px/s²      [800 .. 1600]
+BALL_RADIUS       = 9.0      # px
+BALL_MAX_SPEED    = 2400.0   # px/s       limitar evita túneles en picos
+WALL_E            = 0.55     # restitución [0.3 .. 0.8]
+WALL_MU           = 0.03     # fricción tangencial en impacto
+ROLL_MU           = 0.004    # fricción tangencial en apoyo
+REST_VN           = 70.0     # px/s, por debajo no hay rebote, hay apoyo
+BUMPER_KICK       = 650.0    # px/s
+SLING_KICK        = 520.0    # px/s
+FLIPPER_OMEGA_UP  = 26.0     # rad/s      [20 .. 40]
+FLIPPER_REST      = +30°     # ángulo en reposo respecto a la horizontal
+FLIPPER_UP        = -28°
+PLUNGER_MIN/MAX   = 500 / 1650   # px/s, toque / carga completa (1 s)
+BALL_SAVE_S       = 6.0
+TILT_LIMIT        = 2.5      # calor acumulado; cada nudge suma 1, decae 0,55/s
 ```
 
 ---
@@ -272,6 +294,7 @@ TILT_WINDOW_S  = 2.0
 - Rampas con cambio de plano (bola "por encima" de otros elementos). Space Cadet lo hace con capas; aquí sería ruido.
 - Mesas cargables desde fichero. Si la mesa es Python, el editor de mesas es tu editor de texto.
 - Física continua con tiempo exacto de impacto. Los substeps bastan y se leen.
+- Sprites y texturas. Las luces y las primitivas hacen el trabajo, y el fichero sigue siendo el único artefacto.
 
 Si alguna de estas se vuelve necesaria, probablemente el proyecto ya no debería ser un solo fichero, y ese es el momento de partirlo. No antes.
 
