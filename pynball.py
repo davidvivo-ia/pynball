@@ -37,6 +37,7 @@ todos los sonidos sintetizados a WAV; --mute arranca sin audio.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import random
@@ -95,8 +96,9 @@ TILT_HEAT_PER_NUDGE = 1.0
 TILT_HEAT_DECAY = 0.55          # /s
 TILT_WARN = 1.6
 TILT_LIMIT = 2.5
-NUDGE_VX = 150.0
-NUDGE_VY = -80.0
+NUDGE_VX = 170.0                # px/s  impulso lateral de un golpe
+NUDGE_VY = -60.0                # px/s  todo golpe levanta un poco la bola
+NUDGE_UP_VY = 300.0             # px/s  extra del golpe desde abajo (bang back)
 
 BALLS_PER_GAME = 3
 EXTRA_BALL_SCORE = 50_000
@@ -257,6 +259,7 @@ class Wall:
     threshold: float = 0.0          # vn mínimo para disparar on_hit
     one_way: Vec2 | None = None     # si v·one_way > 0 la bola atraviesa
     name: str = ""                  # "sling", "target", "standup", "lane_divider"...
+    label: str = ""                 # letra del standup
     active: bool = True
     lit: bool = False
     flash: float = 0.0              # segundos restantes de destello
@@ -436,7 +439,12 @@ class Ball:
 
 
 # =============================================================================
-# 5. TABLE
+# 5. TABLE Y MÁQUINAS
+#
+# Todas las máquinas comparten el bastidor (arco, carril, flippers,
+# slingshots, inlanes, outlanes, huecos laterales) y difieren en lo que
+# llevan dentro: carriles superiores, bumpers, agujeros, bancos de dianas,
+# spinner, kickbacks, lámparas, paleta y música.
 # =============================================================================
 
 LANE_X = 474.0                  # pared del carril de lanzamiento
@@ -457,6 +465,40 @@ def arc_y(x: float) -> float:
 
 
 @dataclass(slots=True)
+class Lamp:
+    """Lámpara de inserto: solo luz, sin física. `group` la ata a un patrón."""
+    c: Vec2
+    group: str
+    r: float = 5.0
+    color: tuple[int, int, int] | None = None
+    on: bool = False
+    phase: float = 0.0
+
+
+@dataclass(slots=True)
+class Spinner:
+    """Veleta que gira al atravesarla; puntúa cada media vuelta."""
+    a: Vec2
+    b: Vec2
+    angle: float = 0.0
+    omega: float = 0.0
+    inside: bool = False
+    name: str = "spinner"
+    spins: int = 0
+    flash: float = 0.0
+
+
+@dataclass(slots=True)
+class Kickback:
+    """Resorte en el outlane: si está encendido, devuelve la bola al juego."""
+    x: float
+    y: float
+    lit: bool = False
+    flash: float = 0.0
+    name: str = "kickback"
+
+
+@dataclass(slots=True)
 class Table:
     walls: list[Wall] = field(default_factory=list)
     posts: list[Post] = field(default_factory=list)
@@ -469,90 +511,242 @@ class Table:
     standups: list[Wall] = field(default_factory=list)
     rollovers: list[Sensor] = field(default_factory=list)
     holes: list[Hole] = field(default_factory=list)
+    lamps: list[Lamp] = field(default_factory=list)
+    spinners: list[Spinner] = field(default_factory=list)
+    kickbacks: list[Kickback] = field(default_factory=list)
     sling_polys: list[list[Vec2]] = field(default_factory=list)
+    letters: str = ""               # letras de los standups, en orden
 
     def polyline(self, pts: list[Vec2], **kw) -> list[Wall]:
         out = [Wall(pts[i], pts[i + 1], **kw) for i in range(len(pts) - 1)]
         self.walls.extend(out)
         return out
 
+    def lamp(self, x: float, y: float, group: str, r: float = 5.0, color=None) -> Lamp:
+        lp = Lamp(Vec2(x, y), group, r, color, phase=random.random())
+        self.lamps.append(lp)
+        return lp
 
-def build_table() -> Table:
-    t = Table()
-    V = Vec2
+    # --- piezas reutilizables ---------------------------------------------
+    def frame(self) -> None:
+        """Bastidor común: arco, paredes, carril, puerta, diagonales,
+        techos, postes, guías, slingshots y flippers."""
+        V = Vec2
+        self.arcs.append(Arc(ARC_C, ARC_R))
+        self.polyline([V(20, ARC_C.y), V(20, DRAIN_Y)])
+        self.polyline([V(520, ARC_C.y), V(520, LANE_FLOOR_Y)])
+        self.polyline([V(LANE_X, LANE_FLOOR_Y), V(520, LANE_FLOOR_Y)], e=0.2)
+        self.polyline([V(LANE_X, 345), V(LANE_X, LANE_FLOOR_Y)])
+        self.walls.append(Wall(V(LANE_X, 345), V(515, 305), one_way=V(0, -1), name="gate", e=0.3))
+        for m in (False, True):
+            M = mirror if m else (lambda p: p)
+            self.polyline([M(V(20, 345)), M(V(80, 455))])
+            self.polyline([M(V(80, 611)), M(V(80, 640)), M(V(20, 640))])
+            self.posts.append(Post(M(V(80, 640)), 2.0))
+            self.posts.append(Post(M(V(65, 685)), 7.0))
+            piv = M(V(152, 850))
+            ang = (math.pi - FLIPPER_REST) if m else FLIPPER_REST
+            d = V(math.cos(ang), math.sin(ang))
+            n = V(d.y, -d.x) if not m else V(-d.y, d.x)
+            if n.y > 0:
+                n = n * -1
+            self.polyline([M(V(65, 690)), M(V(65, 792)), piv + n * FLIPPER_R_BASE], e=0.3)
+            A, B, C = M(V(105, 690)), M(V(105, 780)), M(V(150, 790))
+            self.sling_polys.append([A, B, C])
+            self.polyline([A, B, C], e=0.4)
+            face = Wall(C, A, e=SLING_E, kick=SLING_KICK, threshold=SLING_THRESHOLD, name="sling")
+            if (face.nx > 0) != (not m):
+                face = Wall(A, C, e=SLING_E, kick=SLING_KICK, threshold=SLING_THRESHOLD, name="sling")
+            self.walls.append(face)
+            self.slings.append(face)
+            self.flippers.append(Flipper(piv, ang, (math.pi - FLIPPER_UP) if m else FLIPPER_UP))
+            # lámparas de inlane
+            for k in range(3):
+                self.lamp(M(V(85, 705 + k * 28)).x, 705 + k * 28, "inlane", 3.5)
 
-    # --- Arco superior y paredes exteriores
-    t.arcs.append(Arc(ARC_C, ARC_R))
-    t.polyline([V(20, ARC_C.y), V(20, DRAIN_Y)])            # pared izquierda
-    t.polyline([V(520, ARC_C.y), V(520, LANE_FLOOR_Y)])     # pared derecha exterior
-    t.polyline([V(LANE_X, LANE_FLOOR_Y), V(520, LANE_FLOOR_Y)], e=0.2)   # suelo del carril
-    t.polyline([V(LANE_X, 345), V(LANE_X, LANE_FLOOR_Y)])   # pared del carril
-    # Puerta de un solo sentido a la salida del carril: pasa si sube
-    t.walls.append(Wall(V(LANE_X, 345), V(515, 305), one_way=V(0, -1), name="gate", e=0.3))
-
-    # --- Carriles superiores (rollovers)
-    xs = [163.0, 219.0, 275.0, 331.0]
-    for x in xs:
-        top = arc_y(x) + 2 * BALL_RADIUS + 6      # hueco: la órbita rápida pasa por encima
-        t.polyline([V(x, top), V(x, 180)], name="lane_divider")
-        t.posts.append(Post(V(x, 180), 3.0))
-        t.posts.append(Post(V(x, top), 3.0))
-    for i in range(3):
-        s = Sensor(V(xs[i] + 6, 150), V(xs[i + 1] - 6, 150), name="rollover", index=i)
-        t.sensors.append(s)
-        t.rollovers.append(s)
-
-    # --- Bumpers
-    for c in (V(177, 330), V(317, 330), V(247, 425)):
-        b = Post(c, 24.0, e=BUMPER_E, kick=BUMPER_KICK, threshold=40.0, name="bumper")
-        t.posts.append(b)
-        t.bumpers.append(b)
-
-    # --- Agujero kickout bajo el arco, a la izquierda
-    t.holes.append(Hole(V(105, 262)))
-
-    # --- Lado izquierdo y su espejo
-    def side(m: bool) -> None:
-        M = mirror if m else (lambda p: p)
-        # diagonal desde la pared hasta el banco de dianas
-        t.polyline([M(V(20, 345)), M(V(80, 455))])
-        # banco de 3 dianas
+    def side_bank(self, right: bool, kind: str, letters: str = "") -> None:
+        """Rellena el hueco lateral (y 455..611) con tres dianas o standups,
+        o con pared lisa si kind == 'wall'."""
+        M = mirror if right else (lambda p: p)
+        V = Vec2
+        if kind == "wall":
+            self.polyline([M(V(80, 455)), M(V(80, 611))])
+            return
         for i in range(3):
             y0, y1 = 455 + i * 52, 507 + i * 52
-            w = Wall(M(V(80, y0)), M(V(80, y1)), e=0.45, threshold=120.0,
-                     name="standup" if m else "target")
-            t.walls.append(w)
-            (t.standups if m else t.drop_targets).append(w)
-        t.polyline([M(V(80, 611)), M(V(80, 640)), M(V(20, 640))])   # techo: cierra el hueco tras el banco
-        t.posts.append(Post(M(V(80, 640)), 2.0))
-        # poste y guía del inlane
-        t.posts.append(Post(M(V(65, 685)), 7.0))
-        # Guía: termina tangente a la cara superior del flipper en reposo
-        piv = M(V(152, 850))
-        ang = (math.pi - FLIPPER_REST) if m else FLIPPER_REST
-        d = V(math.cos(ang), math.sin(ang))
-        n = V(d.y, -d.x) if not m else V(-d.y, d.x)   # normal hacia arriba
-        if n.y > 0:
-            n = n * -1
-        guide_end = piv + n * FLIPPER_R_BASE
-        t.polyline([M(V(65, 690)), M(V(65, 792)), guide_end], e=0.3)
-        # slingshot: triángulo; la hipotenusa dispara
-        A, B, C = M(V(105, 690)), M(V(105, 780)), M(V(150, 790))
-        t.sling_polys.append([A, B, C])
-        t.polyline([A, B, C], e=0.4)
-        face = Wall(C, A, e=SLING_E, kick=SLING_KICK, threshold=SLING_THRESHOLD, name="sling") \
-            if not m else Wall(A, C, e=SLING_E, kick=SLING_KICK, threshold=SLING_THRESHOLD, name="sling")
-        # la normal debe apuntar hacia el centro del campo
-        if (face.nx > 0) != (not m):
-            face = Wall(face.b, face.a, e=SLING_E, kick=SLING_KICK, threshold=SLING_THRESHOLD, name="sling")
-        t.walls.append(face)
-        t.slings.append(face)
-        # flipper
-        f = Flipper(piv, ang, (math.pi - FLIPPER_UP) if m else FLIPPER_UP)
-        t.flippers.append(f)
+            w = Wall(M(V(80, y0)), M(V(80, y1)), e=0.45, threshold=120.0, name=kind,
+                     label=letters[i] if i < len(letters) else "")
+            self.walls.append(w)
+            (self.standups if kind == "standup" else self.drop_targets).append(w)
+            # flecha-lámpara que apunta a la diana
+            self.lamp(M(V(112, (y0 + y1) / 2)).x, (y0 + y1) / 2, "arrowR" if right else "arrowL", 4.5)
+        if kind == "standup":
+            self.letters += letters
 
-    side(False)
-    side(True)
+    def top_lanes(self, n: int) -> None:
+        """n carriles con rollover entre n+1 divisores centrados en PF_MID."""
+        V = Vec2
+        xs = [PF_MID + (i - n / 2) * 56.0 for i in range(n + 1)]
+        for x in xs:
+            top = arc_y(x) + 2 * BALL_RADIUS + 6
+            self.polyline([V(x, top), V(x, 180)], name="lane_divider")
+            self.posts.append(Post(V(x, 180), 3.0))
+            self.posts.append(Post(V(x, top), 3.0))
+        for i in range(n):
+            s = Sensor(V(xs[i] + 6, 150), V(xs[i + 1] - 6, 150), name="rollover", index=i)
+            self.sensors.append(s)
+            self.rollovers.append(s)
+
+    def bumper(self, x: float, y: float, r: float = 24.0) -> Post:
+        b = Post(Vec2(x, y), r, e=BUMPER_E, kick=BUMPER_KICK, threshold=40.0, name="bumper")
+        self.posts.append(b)
+        self.bumpers.append(b)
+        return b
+
+    def hole(self, x: float, y: float, eject: Vec2) -> Hole:
+        h = Hole(Vec2(x, y), eject=eject)
+        self.holes.append(h)
+        return h
+
+    def spinner(self, x: float, y: float, half: float = 26.0) -> Spinner:
+        s = Spinner(Vec2(x - half, y), Vec2(x + half, y))
+        self.spinners.append(s)
+        self.posts.append(Post(Vec2(x - half - 4, y), 3.0))
+        self.posts.append(Post(Vec2(x + half + 4, y), 3.0))
+        return s
+
+    def kickback(self, right: bool) -> Kickback:
+        x = (2 * PF_MID - 42.0) if right else 42.0
+        k = Kickback(x, 905.0)
+        self.kickbacks.append(k)
+        self.lamp(x, 870, "kickR" if right else "kickL", 5.0)
+        return k
+
+    def ring_lamps(self, n: int = 14) -> None:
+        """Corona de lámparas bajo el arco, para persecuciones."""
+        for i in range(n):
+            a = math.pi + math.pi * (i + 0.5) / n
+            self.lamp(ARC_C.x + math.cos(a) * (ARC_R - 16), ARC_C.y + math.sin(a) * (ARC_R - 16), "ring", 4.0)
+
+    def meter_lamps(self, x: float, y0: float, n: int = 5) -> None:
+        """Columna de lámparas: medidor de combo."""
+        for i in range(n):
+            self.lamp(x, y0 - i * 16, "meter", 4.0)
+
+
+@dataclass(slots=True)
+class Machine:
+    key: str
+    name: str
+    subtitle: str
+    pal: dict[str, tuple[int, int, int]]
+    bpm: float
+    chords: list[list[int]]
+    arp_wave: str
+    build: object                   # Callable[[Table], None]
+
+
+PAL_CLASSIC = dict(
+    field=(26, 22, 40), wall=(120, 112, 160), wall_dim=(70, 64, 96),
+    flipper=(255, 196, 64), flipper_dim=(150, 110, 40),
+    bumper=(255, 80, 110), bumper_lit=(255, 220, 230),
+    sling=(90, 200, 255), sling_lit=(220, 245, 255),
+    target=(120, 240, 140), target_dim=(40, 80, 50),
+    light_on=(255, 240, 120), light_off=(80, 72, 40), accent=(255, 196, 64),
+)
+PAL_NEBULA = dict(
+    field=(10, 12, 32), wall=(96, 120, 210), wall_dim=(50, 60, 110),
+    flipper=(90, 225, 255), flipper_dim=(40, 110, 130),
+    bumper=(140, 90, 255), bumper_lit=(230, 215, 255),
+    sling=(255, 110, 200), sling_lit=(255, 225, 245),
+    target=(150, 255, 220), target_dim=(40, 90, 80),
+    light_on=(190, 225, 255), light_off=(45, 55, 95), accent=(255, 110, 200),
+)
+PAL_TAVERN = dict(
+    field=(44, 28, 18), wall=(180, 128, 72), wall_dim=(100, 70, 40),
+    flipper=(245, 205, 120), flipper_dim=(130, 100, 55),
+    bumper=(225, 95, 40), bumper_lit=(255, 225, 190),
+    sling=(200, 60, 45), sling_lit=(255, 200, 190),
+    target=(245, 220, 120), target_dim=(95, 80, 45),
+    light_on=(255, 205, 90), light_off=(85, 60, 30), accent=(255, 150, 60),
+)
+
+
+def build_classic(t: Table) -> None:
+    """La de siempre: tres carriles, tres bumpers, agujero, dianas y P-Y-N."""
+    t.top_lanes(3)
+    for x, y in ((177, 330), (317, 330), (247, 425)):
+        t.bumper(x, y)
+    t.hole(105, 262, Vec2(120, 360))
+    t.side_bank(False, "target")
+    t.side_bank(True, "standup", "PYN")
+    t.spinner(88, 400)
+    t.kickback(False)
+    t.ring_lamps()
+    t.meter_lamps(247, 560)
+    for x, y in ((177, 372), (317, 372), (247, 470)):
+        t.lamp(x, y, "bumper", 4.0)
+
+
+def build_nebula(t: Table) -> None:
+    """Nebulosa: cuatro carriles, rombo de bumpers, dos agujeros, N-E-B-U-L-A."""
+    t.top_lanes(4)
+    for x, y in ((247, 292), (187, 362), (307, 362), (247, 432)):
+        t.bumper(x, y, 22.0)
+    t.hole(88, 250, Vec2(140, 340))
+    t.hole(406, 250, Vec2(-140, 340))
+    t.side_bank(False, "standup", "NEB")
+    t.side_bank(True, "standup", "ULA")
+    t.spinner(247, 540)
+    t.kickback(False)
+    t.kickback(True)
+    t.ring_lamps(18)
+    t.meter_lamps(247, 640)
+    for i in range(16):                        # estrellas
+        a = random.uniform(0, math.tau)
+        rr = random.uniform(60, 190)
+        x, y = ARC_C.x + math.cos(a) * rr, ARC_C.y + math.sin(a) * rr
+        if y < 240 or 480 < y < 520:
+            t.lamp(x, y, "star", 2.5)
+    for x, y in ((247, 362), (217, 327), (277, 327), (217, 397), (277, 397)):
+        t.lamp(x, y, "bumper", 3.5)
+
+
+def build_tavern(t: Table) -> None:
+    """Taberna: campo de pinchos tipo bagatela, barril, gran bumper, R-O-N."""
+    t.top_lanes(3)
+    t.hole(247, 262, Vec2(0, 420))
+    rows = ((300, 5), (345, 4), (390, 5), (435, 4), (480, 5))
+    for y, n in rows:
+        for i in range(n):
+            x = PF_MID + (i - (n - 1) / 2) * 52.0
+            t.posts.append(Post(Vec2(x, y), 5.0, e=0.7, name=""))
+    t.bumper(247, 560, 28.0)
+    t.side_bank(False, "target")
+    t.side_bank(True, "standup", "RON")
+    t.spinner(402, 400)
+    t.kickback(True)
+    t.ring_lamps(10)
+    t.meter_lamps(247, 680)
+    for i in range(5):
+        t.lamp(PF_MID + (i - 2) * 40.0, 215, "sign", 5.0)
+    t.lamp(247, 610, "bumper", 4.0)
+
+
+MACHINES: list[Machine] = [
+    Machine("classic", "PYNBALL", "la de siempre", PAL_CLASSIC, 112.0,
+            [[57, 60, 64], [53, 57, 60], [48, 52, 55], [55, 59, 62]], "tri", build_classic),
+    Machine("nebula", "NEBULOSA", "cuatro carriles, dos agujeros, seis letras", PAL_NEBULA, 96.0,
+            [[52, 55, 59], [48, 52, 55], [55, 59, 62], [50, 54, 57]], "sine", build_nebula),
+    Machine("tavern", "TABERNA", "bagatela de pinchos, barril y ron", PAL_TAVERN, 132.0,
+            [[48, 52, 55], [53, 57, 60], [55, 59, 62], [48, 52, 55]], "square", build_tavern),
+]
+
+
+def build_table(machine: Machine) -> Table:
+    t = Table()
+    t.frame()
+    machine.build(t)
     return t
 
 
@@ -573,6 +767,7 @@ class Physics:
     def __init__(self, table: Table) -> None:
         self.t = table
         self.events: list[tuple[str, object, float]] = []
+        self.gravity_scale = 1.0        # < 1 con la máquina "levantada" (trampa)
 
     def substep(self, ball: Ball, dt: float, flippers_enabled: bool) -> None:
         t = self.t
@@ -583,7 +778,7 @@ class Physics:
             return
 
         # Integración semi-implícita
-        ball.vy += GRAVITY * dt
+        ball.vy += GRAVITY * self.gravity_scale * dt
         damp = 1.0 - AIR_DAMPING * dt
         ball.vx *= damp
         ball.vy *= damp
@@ -680,6 +875,33 @@ class Physics:
             if inside and not s.inside:
                 self.events.append((s.name, s, 0.0))
             s.inside = inside
+
+        # Spinners: al cruzarlos giran según la velocidad; cada media vuelta puntúa
+        for sp in t.spinners:
+            inside = circle_vs_segment(px, py, r, sp.a.x, sp.a.y, sp.b.x, sp.b.y, 0.0, -1.0) is not None
+            if inside and not sp.inside:
+                sp.omega = math.copysign(max(abs(ball.vy), 200.0) * 0.045, ball.vy)
+                ball.vy *= 0.85                       # la veleta frena un poco
+            sp.inside = inside
+            if sp.omega:
+                before = int(sp.angle / math.pi)
+                sp.angle += sp.omega * dt
+                sp.omega *= (1.0 - 1.6 * dt)
+                if abs(sp.omega) < 0.3:
+                    sp.omega = 0.0
+                if int(sp.angle / math.pi) != before:
+                    sp.spins += 1
+                    self.events.append(("spinner", sp, 0.0))
+
+        # Kickbacks: en el outlane, si está encendido, devuelve la bola
+        for k in t.kickbacks:
+            if k.lit and abs(px - k.x) < 24.0 and py > k.y - 10.0 and ball.vy > 0.0:
+                k.lit = False
+                k.flash = 0.4
+                ball.vx = 0.0
+                ball.vy = -1500.0
+                ball.y = k.y - 12.0
+                self.events.append(("kickback", k, 0.0))
 
         # Desagüe
         if ball.y > DRAIN_Y:
@@ -943,9 +1165,14 @@ class Sounds:
         bank["start"] = [S.norm(S.mix(S.chord([57, 64, 69], 0.5, 0.0, 0.7, wave="square"), S.chord([69, 72, 76, 81, 84], 0.9, 0.08, 0.9)), 0.9)]
         bank["gameover"] = [S.norm(S.mix(S.chord([76, 72, 69, 64], 0.45, 0.22, 0.8), S.chord([45, 52, 57], 1.4, 0.0, 0.7, wave="saw")), 0.9)]
 
+        var("spin", lambda k: S.norm(S.mix(S.band(S.noise(0.012), 2500, 9000) * S.env(0.012, 0.0003, 0.003), S.modal(0.05, 3200 * k, S.METAL) * 0.6), 0.45), 3)
+        var("kickback", lambda k: S.norm(S.mix(S.solenoid(100 * k, 14, 1.0), S.osc(0.3, 180 * k, 720 * k, wave="saw") * S.env(0.3, 0.004, 0.08) * 0.6), 0.9), 2)
+        bank["select"] = [S.norm(S.mix(S.osc(0.08, 660, wave="square") * S.env(0.08, 0.002, 0.03), S.osc(0.12, 990, wave="square") * S.env(0.12, 0.002, 0.04) * 0.6, at=[0.0, 0.06]), 0.5)]
+        bank["cheat"] = [S.norm(S.mix(*[S.osc(0.09, midi_hz(n), wave="square") * S.env(0.09, 0.002, 0.04) for n in (64, 68, 71, 76, 80)], at=[i * 0.06 for i in range(5)]), 0.6)]
+
         # Bucles: rodadura y música (se generan sin fade: periódicos por FFT)
         bank["roll"] = [self._rolling()]
-        bank["music"] = [self._music()]
+        bank["music"] = [self._music(112.0, [[57, 60, 64], [53, 57, 60], [48, 52, 55], [55, 59, 62]], "tri")]
         return bank
 
     def _rolling(self):
@@ -958,14 +1185,13 @@ class Sounds:
         x = np.fft.irfft(X, len(x))
         return S.norm(x, 0.7)
 
-    def _music(self):
-        """Bucle de 4 compases a 112 BPM: bajo, arpegio, bombo, caja y charles.
-        Progresión Am - F - C - G. Generado por notas y mezclado por offsets."""
+    def _music(self, bpm: float, chords: list[list[int]], arp_wave: str = "tri"):
+        """Bucle de 4 compases: bajo, arpegio, bombo, caja y charles, sobre
+        la progresión que pida la máquina. Generado por notas y mezclado por
+        offsets; lo que sobresale del final se pliega al principio."""
         S = self.synth
-        bpm = 112.0
         beat = 60.0 / bpm
         step = beat / 4.0
-        chords = [[57, 60, 64], [53, 57, 60], [48, 52, 55], [55, 59, 62]]     # Am F C G
         parts, offs = [], []
 
         def put(x, t0):
@@ -983,7 +1209,7 @@ class Sounds:
                 put(S.band(x, 40, 900) * 0.55, t0 + i * step)
             arp = [ch[0] + 12, ch[1] + 12, ch[2] + 12, ch[1] + 24, ch[2] + 12, ch[0] + 24, ch[1] + 12, ch[2] + 24] * 2
             for i, n in enumerate(arp):
-                x = S.osc(step * 1.2, midi_hz(n), wave="tri") * S.env(step * 1.2, 0.003, step * 0.6)
+                x = S.osc(step * 1.2, midi_hz(n), wave=arp_wave) * S.env(step * 1.2, 0.003, step * 0.6)
                 put(x * (0.33 if i % 4 == 0 else 0.22), t0 + i * step)
             for i in range(16):
                 if i % 8 == 0:        # bombo
@@ -1009,6 +1235,20 @@ class Sounds:
         music.play(self.bank["music"][0], loops=-1)
         v = MUSIC_VOL * MASTER_VOL if self.music_on else 0.0
         music.set_volume(v, v)
+
+    def set_music(self, bpm: float, chords: list[list[int]], arp_wave: str = "tri") -> None:
+        """Regenera el bucle musical para una máquina y lo reinicia."""
+        if not self.ok:
+            return
+        try:
+            self.bank["music"] = [pygame.sndarray.make_sound(self._to_pcm(self._music(bpm, chords, arp_wave)))]
+            ch = pygame.mixer.Channel(self.CH_MUSIC)
+            ch.stop()
+            ch.play(self.bank["music"][0], loops=-1)
+            v = MUSIC_VOL * MASTER_VOL if self.music_on else 0.0
+            ch.set_volume(v, v)
+        except Exception:
+            pass
 
     def toggle_music(self) -> bool:
         self.music_on = not self.music_on
@@ -1087,11 +1327,12 @@ class Sounds:
 
 
 # =============================================================================
-# 8. REGLAS Y MÁQUINA DE ESTADOS
+# 8. REGLAS, LUCES, TRAMPAS Y MÁQUINA DE ESTADOS
 # =============================================================================
 
 LEFT_KEYS = (pygame.K_LSHIFT, pygame.K_z, pygame.K_LEFT, pygame.K_LCTRL)
 RIGHT_KEYS = (pygame.K_RSHIFT, pygame.K_SLASH, pygame.K_RIGHT, pygame.K_RCTRL)
+CHEAT_WORD = "trampa"
 
 
 class State(Enum):
@@ -1112,17 +1353,20 @@ class Particle:
 
 
 class Game:
-    def __init__(self, sounds: Sounds) -> None:
-        self.table = build_table()
-        self.phys = Physics(self.table)
+    def __init__(self, sounds: Sounds, machine_index: int = 0) -> None:
         self.snd = sounds
         self.state = State.ATTRACT
         self.time = 0.0
         self.timers: list[tuple[float, object]] = []
         self.ball = Ball(PLUNGER_X, 900.0)
         self.ball.alive = False
+        self.hiscores = self.load_hiscores()
+        self.machine_index = machine_index
+        self.machine = MACHINES[machine_index]
+        self.table = build_table(self.machine)
+        self.phys = Physics(self.table)
+        self.pal = self.machine.pal
         self.score = 0
-        self.hiscore = self.load_hiscore()
         self.balls_left = 0
         self.ball_number = 0
         self.bonus = 0
@@ -1130,45 +1374,72 @@ class Game:
         self.extra_ball_given = False
         self.tilt = False
         self.tilt_heat = 0.0
-        self.tilt_warned = False
         self.ball_save_until = 0.0
         self.launch_time = -1.0
         self.skill_lane = -1
         self.skill_active = False
         self.plunger_charge = 0.0
         self.plunger_held = False
+        self.ratchet_step = 0
         self.combo = 0
         self.combo_time = 0.0
         self.message = ""
         self.message_until = 0.0
         self.shake = 0.0
         self.shake_x = 0.0
+        self.shake_y = 0.0
         self.particles: list[Particle] = []
         self.debug = False
         self.paused = False
         self.flash = 0.0
-        self.ratchet_step = 0
+        self.show_until = 0.0           # persecución de luces por evento
+        self.show_kind = ""
+        # trampas
+        self.cheat = False
+        self.typed = ""
+        self.gravity_scale = 1.0
+        self.tilt_immune = False
+        self.slowmo = False
+        self.dragging = False
+        self.drag_prev: tuple[float, float] | None = None
+        self.mouse = (0.0, 0.0)
+        self.snd.set_music(self.machine.bpm, self.machine.chords, self.machine.arp_wave)
 
-    # --- utilidades -------------------------------------------------------
+    # --- récords por máquina ----------------------------------------------
     @staticmethod
-    def load_hiscore() -> int:
+    def load_hiscores() -> dict[str, int]:
         try:
-            return int(HISCORE_FILE.read_text().strip() or "0")
+            raw = HISCORE_FILE.read_text().strip()
+            if raw.isdigit():                       # formato antiguo: un entero
+                return {"classic": int(raw)}
+            data = json.loads(raw or "{}")
+            return {str(k): int(v) for k, v in data.items()}
         except Exception:
-            return 0
+            return {}
+
+    @property
+    def hiscore(self) -> int:
+        return self.hiscores.get(self.machine.key, 0)
 
     def save_hiscore(self) -> None:
+        if self.cheat:
+            return
         try:
-            HISCORE_FILE.write_text(str(self.hiscore))
+            HISCORE_FILE.write_text(json.dumps(self.hiscores))
         except Exception:
             pass
 
+    # --- utilidades -------------------------------------------------------
     def after(self, delay: float, fn) -> None:
         self.timers.append((self.time + delay, fn))
 
     def say(self, text: str, dur: float = 1.6) -> None:
         self.message = text
         self.message_until = self.time + dur
+
+    def light_show(self, kind: str, dur: float = 1.6) -> None:
+        self.show_kind = kind
+        self.show_until = self.time + dur
 
     def add_score(self, pts: int) -> None:
         if self.tilt or self.state is not State.PLAYING:
@@ -1178,20 +1449,33 @@ class Game:
     def _bump(self, pts: int) -> None:
         """Suma puntos ya multiplicados y comprueba récord y bola extra."""
         self.score += pts
-        if self.score > self.hiscore:
-            self.hiscore = self.score
+        if self.score > self.hiscore and not self.cheat:
+            self.hiscores[self.machine.key] = self.score
         if not self.extra_ball_given and self.score >= EXTRA_BALL_SCORE:
             self.extra_ball_given = True
             self.balls_left += 1
             self.say("EXTRA BALL", 2.5)
             self.snd.play("extra")
             self.flash = 0.4
+            self.light_show("sweep", 2.5)
 
     def spawn_particles(self, x: float, y: float, n: int, color: tuple[int, int, int], speed: float = 260.0) -> None:
         for _ in range(n):
             a = random.uniform(0, math.tau)
             s = random.uniform(0.3, 1.0) * speed
             self.particles.append(Particle(x, y, math.cos(a) * s, math.sin(a) * s, random.uniform(0.25, 0.55), color))
+
+    # --- máquinas -----------------------------------------------------------
+    def select_machine(self, delta: int) -> None:
+        self.machine_index = (self.machine_index + delta) % len(MACHINES)
+        self.machine = MACHINES[self.machine_index]
+        self.table = build_table(self.machine)
+        self.phys = Physics(self.table)
+        self.pal = self.machine.pal
+        self.ball.alive = False
+        self.particles.clear()
+        self.snd.play("select", None, 0.7)
+        self.snd.set_music(self.machine.bpm, self.machine.chords, self.machine.arp_wave)
 
     # --- partida ----------------------------------------------------------
     def new_game(self) -> None:
@@ -1206,15 +1490,18 @@ class Game:
         self.timers.clear()
         self.particles.clear()
         for w in self.table.drop_targets:
-            w.active, w.lit = True, False
+            w.lit = False
         for w in self.table.standups:
             w.lit = False
         for s in self.table.rollovers:
             s.lit = False
         for h in self.table.holes:
             h.visits = 0
+        for k in self.table.kickbacks:
+            k.lit = True                    # el primer kickback de la partida va de regalo
         self.state = State.PLAYING
         self.snd.play("start")
+        self.light_show("sweep", 1.5)
         self.next_ball()
 
     def next_ball(self) -> None:
@@ -1223,13 +1510,13 @@ class Game:
             self.save_hiscore()
             self.snd.play("gameover")
             self.say("GAME OVER", 4.0)
+            self.light_show("fade", 3.0)
             return
         self.balls_left -= 1
         self.ball_number += 1
         self.bonus = 0
         self.tilt = False
         self.tilt_heat = 0.0
-        self.tilt_warned = False
         self.combo = 0
         self.state = State.PLAYING
         self.reset_ball_to_plunger()
@@ -1259,19 +1546,29 @@ class Game:
         if self.launch_time < 0:
             self.launch_time = self.time
             self.ball_save_until = self.time + BALL_SAVE_S
-            self.skill_lane = random.randrange(3)
+            self.skill_lane = random.randrange(len(self.table.rollovers))
             self.skill_active = True
             self.say("SKILL SHOT", 1.2)
 
-    def nudge(self, dx: float) -> None:
-        if self.state is not State.PLAYING or self.tilt or not self.ball.alive or self.ball.in_lane():
+    # --- golpes a la máquina ------------------------------------------------
+    def nudge(self, dx: float, dy: float) -> None:
+        """Golpe a la máquina. dx: lateral (-1 izq, +1 der); dy: -1 desde abajo.
+        La bola recibe el impulso; el calor de tilt sube y decae con el tiempo."""
+        if self.state is not State.PLAYING or self.tilt or not self.ball.alive:
             return
-        self.tilt_heat += TILT_HEAT_PER_NUDGE
-        self.ball.vx += dx * NUDGE_VX
-        self.ball.vy += NUDGE_VY
-        self.shake = 0.18
+        if self.ball.in_lane() and not self.cheat:
+            return
+        heat = TILT_HEAT_PER_NUDGE * (1.4 if dy else 1.0)
+        if not self.tilt_immune:
+            self.tilt_heat += heat
+        b = self.ball
+        if not b.held:
+            b.vx += dx * NUDGE_VX
+            b.vy += NUDGE_VY + dy * NUDGE_UP_VY
+        self.shake = 0.2
         self.shake_x = dx
-        self.snd.play("nudge", self.ball.x, 0.8)
+        self.shake_y = dy
+        self.snd.play("nudge", b.x, 0.8 if not dy else 1.0)
         if self.tilt_heat > TILT_LIMIT:
             self.do_tilt()
         elif self.tilt_heat > TILT_WARN:
@@ -1285,6 +1582,7 @@ class Game:
             f.pressed = False
         self.say("TILT", 3.0)
         self.snd.play("tilt")
+        self.light_show("off", 3.0)
 
     def lane_change(self) -> None:
         """Pulsar un flipper rota las luces de los carriles superiores."""
@@ -1295,6 +1593,78 @@ class Game:
         lits = [lits[-1]] + lits[:-1]
         for s, v in zip(r, lits):
             s.lit = v
+
+    # --- trampas --------------------------------------------------------------
+    def toggle_cheat(self) -> None:
+        self.cheat = not self.cheat
+        if self.cheat:
+            self.say("MODO TRAMPA: sin récord", 2.5)
+            self.snd.play("cheat")
+        else:
+            self.say("TRAMPAS OFF", 1.5)
+            self.gravity_scale = 1.0
+            self.tilt_immune = False
+            self.slowmo = False
+            self.phys.gravity_scale = 1.0
+
+    def cheat_key(self, key: int) -> bool:
+        if not self.cheat:
+            return False
+        match key:
+            case pygame.K_F2:
+                self.gravity_scale = 0.45 if self.gravity_scale == 1.0 else 1.0
+                self.phys.gravity_scale = self.gravity_scale
+                self.say("MÁQUINA LEVANTADA" if self.gravity_scale < 1 else "MÁQUINA EN EL SUELO", 1.5)
+            case pygame.K_F3:
+                self.tilt_immune = not self.tilt_immune
+                self.tilt_heat = 0.0
+                self.say("PLOMADA ATADA" if self.tilt_immune else "PLOMADA LIBRE", 1.5)
+            case pygame.K_F4:
+                if self.state is State.PLAYING:
+                    self.balls_left += 1
+                    self.say("BOLA DE REGALO", 1.5)
+            case pygame.K_F5:
+                if self.state is State.PLAYING:
+                    self._bump(10_000)
+                    self.say("+10.000", 1.0)
+            case pygame.K_F6:
+                self.slowmo = not self.slowmo
+                self.say("CÁMARA LENTA" if self.slowmo else "VELOCIDAD NORMAL", 1.5)
+            case pygame.K_F7:
+                if self.state is State.PLAYING:
+                    b = self.ball
+                    b.x, b.y, b.vx, b.vy = self.mouse[0], self.mouse[1], 0.0, 0.0
+                    b.alive, b.held = True, False
+                    self.say("BOLA EN LA MANO", 1.0)
+            case _:
+                return False
+        self.snd.play("cheat", None, 0.5)
+        return True
+
+    def mouse_down(self, pos: tuple[float, float]) -> None:
+        self.mouse = pos
+        b = self.ball
+        if self.cheat and b.alive and math.hypot(pos[0] - b.x, pos[1] - b.y) < 40:
+            self.dragging = True
+            self.drag_prev = pos
+            b.held = False
+            for h in self.table.holes:
+                h.holding = False
+
+    def mouse_move(self, pos: tuple[float, float]) -> None:
+        self.mouse = pos
+        if self.dragging and self.ball.alive:
+            b = self.ball
+            if self.drag_prev is not None:
+                b.vx = (pos[0] - self.drag_prev[0]) * 40.0
+                b.vy = (pos[1] - self.drag_prev[1]) * 40.0
+            b.x, b.y = pos
+            self.drag_prev = pos
+
+    def mouse_up(self, pos: tuple[float, float]) -> None:
+        self.mouse = pos
+        self.dragging = False
+        self.drag_prev = None
 
     # --- eventos de física ------------------------------------------------
     def handle_events(self) -> None:
@@ -1310,19 +1680,23 @@ class Game:
                     self.add_score(pts)
                     self.snd.play("bumper", obj.c.x, 0.9)
                     self.snd.play("bumper_note", obj.c.x, 0.55, index=min(self.combo, 10) - 1)
-                    self.spawn_particles(obj.c.x, obj.c.y, 10, C_BUMPER_LIT)
+                    self.spawn_particles(obj.c.x, obj.c.y, 10, self.pal["bumper_lit"])
+                    for lp in self.table.lamps:
+                        if lp.group == "bumper":
+                            lp.phase = self.time
                     if self.combo >= 5 and self.combo % 5 == 0:
                         self.say(f"COMBO x{self.combo}", 0.8)
+                        self.light_show("flash", 0.6)
                 case "sling":
                     assert isinstance(obj, Wall)
                     obj.flash = 0.1
                     self.add_score(50)
                     mx, my = (obj.a.x + obj.b.x) / 2, (obj.a.y + obj.b.y) / 2
                     self.snd.play("sling", mx, 0.9)
-                    self.spawn_particles(mx, my, 6, C_SLING_LIT, 180)
+                    self.spawn_particles(mx, my, 6, self.pal["sling_lit"], 180)
                 case "target":
                     assert isinstance(obj, Wall)
-                    if obj.active and not obj.lit:
+                    if not obj.lit:
                         obj.lit = True
                         obj.flash = 0.2
                         self.add_score(500)
@@ -1332,6 +1706,7 @@ class Game:
                             self.add_score(5000)
                             self.say("BANCO 5000", 1.5)
                             self.snd.play("bank_complete", obj.a.x)
+                            self.light_show("sweep", 1.5)
                             self.after(1.0, self.reset_drop_targets)
                 case "standup":
                     assert isinstance(obj, Wall)
@@ -1342,9 +1717,13 @@ class Game:
                         self.bonus += 500
                         self.snd.play("standup", obj.a.x)
                         if all(w.lit for w in self.table.standups):
-                            self.add_score(3000)
-                            self.say("P-Y-N 3000", 1.5)
+                            self.add_score(3000 * len(self.table.standups) // 3)
+                            self.say(f"{'-'.join(self.table.letters)} {3000 * len(self.table.standups) // 3}", 1.5)
                             self.snd.play("bank_complete", obj.a.x)
+                            self.light_show("sweep", 1.5)
+                            for k in self.table.kickbacks:
+                                k.lit = True
+                                k.flash = 0.5
                             self.after(1.0, self.reset_standups)
                     else:
                         self.add_score(50)
@@ -1361,6 +1740,7 @@ class Game:
                             self.say("SKILL SHOT 5000", 1.5)
                             self.snd.play("skill")
                             self.flash = 0.3
+                            self.light_show("sweep", 1.5)
                     self.add_score(pts)
                     rx = (obj.a.x + obj.b.x) / 2
                     self.snd.play("rollover", rx, 0.8, index=obj.index)
@@ -1376,6 +1756,7 @@ class Game:
                             self.add_score(10000)
                             self.say("CARRILES 10000", 1.5)
                             self.snd.play("lanes_complete")
+                        self.light_show("chase", 1.5)
                 case "hole":
                     assert isinstance(obj, Hole)
                     obj.visits += 1
@@ -1386,7 +1767,19 @@ class Game:
                     self.say(f"AGUJERO {award}", 1.2)
                     self.snd.play("hole_in", obj.c.x)
                     self.flash = 0.2
+                    self.light_show("flash", 0.5)
                     self.after(1.2, lambda h=obj: self.eject(h))
+                case "spinner":
+                    assert isinstance(obj, Spinner)
+                    obj.flash = 0.15
+                    self.add_score(100)
+                    self.snd.play("spin", (obj.a.x + obj.b.x) / 2, 0.6)
+                case "kickback":
+                    assert isinstance(obj, Kickback)
+                    self.add_score(1000)
+                    self.say("KICKBACK", 1.0)
+                    self.snd.play("kickback", obj.x)
+                    self.spawn_particles(obj.x, obj.y, 8, self.pal["light_on"], 220)
                 case "flipper_hit":
                     assert isinstance(obj, Flipper)
                     self.combo = 0
@@ -1408,7 +1801,7 @@ class Game:
         b.vx = h.eject.x + random.uniform(-40, 40)
         b.vy = h.eject.y + random.uniform(-40, 40)
         self.snd.play("hole_out", h.c.x)
-        self.spawn_particles(h.c.x, h.c.y, 8, C_LIGHT_ON, 200)
+        self.spawn_particles(h.c.x, h.c.y, 8, self.pal["light_on"], 200)
 
     def reset_drop_targets(self) -> None:
         for w in self.table.drop_targets:
@@ -1458,6 +1851,14 @@ class Game:
             self.launch_time = self.time   # no reactivar skill shot
 
     # --- entrada ----------------------------------------------------------
+    def text_input(self, ch: str) -> None:
+        """Acumula letras para los códigos secretos."""
+        if ch and ch.isalpha():
+            self.typed = (self.typed + ch.lower())[-12:]
+            if self.typed.endswith(CHEAT_WORD):
+                self.typed = ""
+                self.toggle_cheat()
+
     def key_down(self, key: int) -> None:
         if key == pygame.K_ESCAPE:
             raise SystemExit
@@ -1467,11 +1868,24 @@ class Game:
         if key == pygame.K_p:
             self.paused = not self.paused
             return
-        if key == pygame.K_r:
-            self.new_game()
-            return
         if key == pygame.K_m:
             self.say("MÚSICA ON" if self.snd.toggle_music() else "MÚSICA OFF", 1.0)
+            return
+        if self.cheat_key(key):
+            return
+        if self.state in (State.ATTRACT, State.GAME_OVER):
+            if key in LEFT_KEYS:
+                self.select_machine(-1)
+                return
+            if key in RIGHT_KEYS:
+                self.select_machine(1)
+                return
+            if key in (pygame.K_r, pygame.K_RETURN, pygame.K_SPACE):
+                self.new_game()
+                return
+            return
+        if key == pygame.K_r:
+            self.new_game()
             return
         if self.state is not State.PLAYING:
             return
@@ -1491,11 +1905,11 @@ class Game:
             self.plunger_charge = 0.0
             self.ratchet_step = 0
         elif key == pygame.K_x:
-            self.nudge(-1.0)
+            self.nudge(-1.0, 0.0)
         elif key == pygame.K_v:
-            self.nudge(1.0)
+            self.nudge(1.0, 0.0)
         elif key == pygame.K_c:
-            self.nudge(0.0)
+            self.nudge(0.0, -1.0)
 
     def key_up(self, key: int) -> None:
         if key in LEFT_KEYS:
@@ -1512,11 +1926,67 @@ class Game:
                 self.launch()
                 self.plunger_charge = 0.0
 
+    # --- luces ------------------------------------------------------------------
+    def update_lamps(self) -> None:
+        """Decide qué lámpara está encendida. Es un pequeño secuenciador:
+        patrón de fondo por estado y persecuciones temporales por evento."""
+        t = self.time
+        show = self.show_kind if t < self.show_until else ""
+        k_show = (self.show_until - t) if show else 0.0
+        targets_unlit = [not w.lit for w in self.table.drop_targets]
+        standups_unlit = [not w.lit for w in self.table.standups]
+        combo_level = min(5, self.combo) if (t - self.combo_time) < 1.2 else 0
+        attract = self.state in (State.ATTRACT, State.GAME_OVER)
+        ring = [lp for lp in self.table.lamps if lp.group == "ring"]
+        n_ring = max(1, len(ring))
+        iL = iR = iM = 0
+        blink = (t * 4.0) % 1.0 < 0.5
+        for lp in self.table.lamps:
+            g = lp.group
+            on = False
+            if show == "off":
+                on = False
+            elif show == "flash":
+                on = (t * 12.0) % 1.0 < 0.5
+            elif show == "fade":
+                on = random.random() < k_show / 3.0 * 0.3
+            elif g == "ring":
+                idx = ring.index(lp)
+                if show == "sweep":
+                    head = (1.0 - k_show / 1.5) * n_ring * 1.6
+                    on = abs(idx - head) < 2.0 or abs(idx - (n_ring - head)) < 2.0
+                elif show == "chase" or attract:
+                    on = (idx - int(t * 10)) % n_ring < 3 if show == "chase" else (idx - int(t * 4)) % n_ring < 2
+                else:
+                    on = idx < n_ring * clamp(self.tilt_heat / TILT_LIMIT, 0.0, 1.0) and blink
+            elif g == "arrowL":
+                on = attract and blink or (not attract and (targets_unlit[iL] if iL < len(targets_unlit) else False) and blink)
+                iL += 1
+            elif g == "arrowR":
+                on = attract and blink or (not attract and (standups_unlit[iR] if iR < len(standups_unlit) else False) and blink)
+                iR += 1
+            elif g == "meter":
+                on = (iM < combo_level) if not attract else ((int(t * 6) % 6) > iM)
+                iM += 1
+            elif g == "bumper":
+                on = (t - lp.phase) < 0.25 or (attract and (t * 3 + lp.phase) % 1.0 < 0.3)
+            elif g in ("kickL", "kickR"):
+                lit = any(k.lit for k in self.table.kickbacks if (k.x < PF_MID) == (g == "kickL"))
+                on = lit and (blink or attract)
+            elif g == "inlane":
+                on = (int(t * 8) + int(lp.c.y)) % 3 == 0 if (attract or show) else (self.time < self.ball_save_until and blink)
+            elif g == "star":
+                on = (math.sin(t * 2.0 + lp.phase * 20) > 0.6)
+            elif g == "sign":
+                on = (int(t * 5) % 5) == int(lp.phase * 5) % 5 if attract else blink or self.multiplier > 1
+            lp.on = on
+
     # --- actualización ----------------------------------------------------
     def update(self, dt: float) -> None:
         """Un paso fijo de física + reglas."""
+        if self.slowmo:
+            dt *= 0.35
         self.time += dt
-        # Timers
         due = [tm for tm in self.timers if tm[0] <= self.time]
         if due:
             self.timers = [tm for tm in self.timers if tm[0] > self.time]
@@ -1537,15 +2007,16 @@ class Game:
         playing = self.state in (State.PLAYING, State.BALL_LOST)
         sub = dt / SUBSTEPS
         flippers_on = not self.tilt and self.state is State.PLAYING
-        for _ in range(SUBSTEPS):
-            self.phys.substep(self.ball, sub, flippers_on)
+        if not self.dragging:
+            for _ in range(SUBSTEPS):
+                self.phys.substep(self.ball, sub, flippers_on)
         self.handle_events()
-        self.snd.update(dt, self.ball, self.state is State.PLAYING)
+        self.snd.update(dt, self.ball, self.state is State.PLAYING and not self.dragging)
 
         # Bola atascada: pequeño empujón aleatorio
         b = self.ball
         held = any(f.pressed for f in self.table.flippers)
-        if playing and b.alive and not b.held and not b.in_lane() and not held:
+        if playing and b.alive and not b.held and not b.in_lane() and not held and not self.dragging:
             if b.speed() < 12.0:
                 b.still_time += dt
                 if b.still_time > STUCK_S:
@@ -1555,7 +2026,6 @@ class Game:
             else:
                 b.still_time = 0.0
 
-        # Estela
         if b.alive:
             b.trail.append((b.x, b.y))
             if len(b.trail) > 10:
@@ -1574,6 +2044,12 @@ class Game:
         for h in self.table.holes:
             if h.flash > 0:
                 h.flash -= dt
+        for sp in self.table.spinners:
+            if sp.flash > 0:
+                sp.flash -= dt
+        for k in self.table.kickbacks:
+            if k.flash > 0:
+                k.flash -= dt
         self.shake = max(0.0, self.shake - dt)
         self.flash = max(0.0, self.flash - dt)
         alive: list[Particle] = []
@@ -1585,6 +2061,7 @@ class Game:
                 p.y += p.vy * dt
                 alive.append(p)
         self.particles = alive
+        self.update_lamps()
 
 
 # =============================================================================
@@ -1594,6 +2071,7 @@ class Game:
 class Renderer:
     def __init__(self) -> None:
         self.surf = pygame.Surface((W, H))
+        self.glow = pygame.Surface((W, H), pygame.SRCALPHA)
         self.font_big = pygame.font.Font(None, 56)
         self.font = pygame.font.Font(None, 30)
         self.font_small = pygame.font.Font(None, 22)
@@ -1607,138 +2085,157 @@ class Renderer:
     def draw(self, g: Game, blink: bool) -> pygame.Surface:
         s = self.surf
         t = g.table
+        pal = g.pal
         s.fill(C_BG)
-        ox = 0.0
+        ox = oy = 0.0
         if g.shake > 0:
-            ox = math.sin(g.shake * 60) * 6 * g.shake_x if g.shake_x else math.sin(g.shake * 60) * 3
-        oy = 0.0 if g.shake_x else (math.sin(g.shake * 50) * 5 if g.shake > 0 else 0.0)
+            k = math.sin(g.shake * 60) * (g.shake / 0.2)
+            ox = k * 7 * g.shake_x
+            oy = k * 7 * g.shake_y if g.shake_y else k * 2
 
         def P(v: Vec2 | tuple[float, float]) -> tuple[float, float]:
             if isinstance(v, Vec2):
                 return (v.x + ox, v.y + oy)
             return (v[0] + ox, v[1] + oy)
 
-        # Campo de juego: relleno del arco y rectángulo
-        pygame.draw.circle(s, C_FIELD, P(ARC_C), ARC_R)
-        pygame.draw.rect(s, C_FIELD, pygame.Rect(20 + ox, ARC_C.y + oy, 500, H - ARC_C.y))
-        pygame.draw.rect(s, C_BG, pygame.Rect(0, 0, W, HUD_H))
-
-        # Arco
-        pygame.draw.circle(s, C_WALL, P(ARC_C), ARC_R, 3)
-        pygame.draw.rect(s, C_FIELD, pygame.Rect(0 + ox, ARC_C.y + oy, W, H))
+        # Campo de juego
+        pygame.draw.circle(s, pal["field"], P(ARC_C), ARC_R)
+        pygame.draw.rect(s, pal["field"], pygame.Rect(20 + ox, ARC_C.y + oy, 500, H - ARC_C.y))
+        pygame.draw.circle(s, pal["wall"], P(ARC_C), ARC_R, 3)
+        pygame.draw.rect(s, pal["field"], pygame.Rect(0 + ox, ARC_C.y + oy, W, H))
         pygame.draw.rect(s, C_BG, pygame.Rect(0, ARC_C.y + oy, 20 + ox, H))
         pygame.draw.rect(s, C_BG, pygame.Rect(520 + ox, ARC_C.y + oy, W, H))
 
-        # Slingshots (relleno)
+        # Lámparas (debajo de todo, con halo)
+        self.glow.fill((0, 0, 0, 0))
+        for lp in t.lamps:
+            col = lp.color or pal["light_on"]
+            if lp.on:
+                pygame.draw.circle(self.glow, (*col, 60), P(lp.c), lp.r * 3.0)
+                pygame.draw.circle(s, col, P(lp.c), lp.r)
+                pygame.draw.circle(s, (255, 255, 255), P(lp.c), max(1.0, lp.r * 0.4))
+            else:
+                pygame.draw.circle(s, pal["light_off"], P(lp.c), lp.r)
+                pygame.draw.circle(s, pal["wall_dim"], P(lp.c), lp.r, 1)
+        s.blit(self.glow, (0, 0))
+
+        # Slingshots
         for poly, face in zip(t.sling_polys, t.slings):
-            col = mix(C_SLING, C_SLING_LIT, face.flash * 8)
-            pygame.draw.polygon(s, col, [P(v) for v in poly])
+            pygame.draw.polygon(s, mix(pal["sling"], pal["sling_lit"], face.flash * 8), [P(v) for v in poly])
 
         # Paredes
         for w in t.walls:
-            if w.name in ("target", "standup"):
+            if w.name in ("target", "standup", "sling"):
                 continue
-            if w.name == "sling":
-                continue
-            col = C_WALL
-            width = 3
+            col, width = pal["wall"], 3
             if w.name == "gate":
-                col = C_WALL_DIM
-                width = 2
-            if w.name == "lane_divider":
+                col, width = pal["wall_dim"], 2
+            elif w.name == "lane_divider":
                 width = 4
             pygame.draw.line(s, col, P(w.a), P(w.b), width)
 
-        # Dianas
+        # Dianas y standups
         for w in t.drop_targets:
-            col = C_TARGET_DIM if w.lit else C_TARGET
-            col = mix(col, (255, 255, 255), w.flash * 4)
+            col = mix(pal["target_dim"] if w.lit else pal["target"], (255, 255, 255), w.flash * 4)
             a, b = P(w.a), P(w.b)
             pygame.draw.line(s, col, a, b, 6)
             if not w.lit:
                 pygame.draw.line(s, (255, 255, 255), (a[0] - 1, a[1] + 6), (b[0] - 1, b[1] - 6), 1)
-        for i, w in enumerate(t.standups):
-            col = C_LIGHT_ON if w.lit else C_TARGET
-            col = mix(col, (255, 255, 255), w.flash * 4)
+        for w in t.standups:
+            col = mix(pal["light_on"] if w.lit else pal["target"], (255, 255, 255), w.flash * 4)
             a, b = P(w.a), P(w.b)
             pygame.draw.line(s, col, a, b, 6)
-            self.text("PYN"[i], self.font_small, C_LIGHT_ON if w.lit else C_TEXT_DIM,
-                      ((a[0] + b[0]) / 2 - 14, (a[1] + b[1]) / 2), "center")
+            if w.label:
+                side = -1 if w.a.x > PF_MID else 1
+                self.text(w.label, self.font_small, pal["light_on"] if w.lit else C_TEXT_DIM,
+                          ((a[0] + b[0]) / 2 + 14 * side, (a[1] + b[1]) / 2), "center")
 
         # Rollovers
         for i, r in enumerate(t.rollovers):
             mx, my = (r.a.x + r.b.x) / 2, (r.a.y + r.b.y) / 2
             lit = r.lit or (g.skill_active and g.skill_lane == i and blink)
-            col = C_LIGHT_ON if lit else C_LIGHT_OFF
-            col = mix(col, (255, 255, 255), r.flash * 3)
+            col = mix(pal["light_on"] if lit else pal["light_off"], (255, 255, 255), r.flash * 3)
             pygame.draw.circle(s, col, P((mx, my)), 9)
-            pygame.draw.circle(s, C_WALL_DIM, P((mx, my)), 9, 1)
+            pygame.draw.circle(s, pal["wall_dim"], P((mx, my)), 9, 1)
 
         # Agujeros
         for h in t.holes:
-            col = mix((40, 36, 60), C_LIGHT_ON, h.flash * 0.8)
-            pygame.draw.circle(s, col, P(h.c), h.r)
-            pygame.draw.circle(s, C_WALL_DIM, P(h.c), h.r, 2)
-            pygame.draw.circle(s, mix(C_LIGHT_OFF, C_LIGHT_ON, min(1.0, h.visits / 4)), P(h.c), 4)
+            pygame.draw.circle(s, mix((40, 36, 60), pal["light_on"], h.flash * 0.8), P(h.c), h.r)
+            pygame.draw.circle(s, pal["wall_dim"], P(h.c), h.r, 2)
+            pygame.draw.circle(s, mix(pal["light_off"], pal["light_on"], min(1.0, h.visits / 4)), P(h.c), 4)
+
+        # Spinners: barra que gira en falso 3D
+        for sp in t.spinners:
+            mx, my = (sp.a.x + sp.b.x) / 2, (sp.a.y + sp.b.y) / 2
+            half = (sp.b.x - sp.a.x) / 2
+            w = abs(math.cos(sp.angle)) * half
+            col = mix(pal["accent"], (255, 255, 255), sp.flash * 4)
+            pygame.draw.line(s, pal["wall_dim"], P((sp.a.x, my)), P((sp.b.x, my)), 1)
+            pygame.draw.line(s, col, P((mx - w, my)), P((mx + w, my)), 5)
+            pygame.draw.circle(s, pal["wall"], P((mx, my)), 3)
+
+        # Kickbacks
+        for k in t.kickbacks:
+            col = mix(pal["light_on"] if k.lit else pal["wall_dim"], (255, 255, 255), k.flash * 2)
+            pygame.draw.rect(s, col, pygame.Rect(k.x - 7 + ox, k.y + oy, 14, 40))
+            pygame.draw.line(s, pal["wall"], P((k.x - 11, k.y + 40)), P((k.x + 11, k.y + 40)), 3)
 
         # Postes y bumpers
         for p in t.posts:
             if p.name == "bumper":
-                col = mix(C_BUMPER, C_BUMPER_LIT, p.flash * 8)
+                col = mix(pal["bumper"], pal["bumper_lit"], p.flash * 8)
                 rr = p.r + (6 * p.flash / 0.12 if p.flash > 0 else 0)
-                pygame.draw.circle(s, mix(C_BUMPER, C_FIELD, 0.6), P(p.c), rr + 4)
+                pygame.draw.circle(s, mix(pal["bumper"], pal["field"], 0.6), P(p.c), rr + 4)
                 pygame.draw.circle(s, col, P(p.c), p.r)
-                pygame.draw.circle(s, C_BUMPER_LIT, P(p.c), p.r * 0.45)
+                pygame.draw.circle(s, pal["bumper_lit"], P(p.c), p.r * 0.45)
             else:
-                pygame.draw.circle(s, C_WALL, P(p.c), p.r)
+                pygame.draw.circle(s, pal["wall"], P(p.c), p.r)
+                if p.r >= 5:
+                    pygame.draw.circle(s, pal["wall_dim"], P(p.c), p.r, 1)
 
         # Flippers
         for f in t.flippers:
-            col = C_FLIPPER if (not g.tilt and g.state is State.PLAYING) else C_FLIPPER_DIM
+            col = pal["flipper"] if (not g.tilt and g.state is State.PLAYING) else pal["flipper_dim"]
             a, b = P(f.pivot), P(f.tip())
             pygame.draw.circle(s, col, a, f.r_base)
             pygame.draw.circle(s, col, b, f.r_tip)
             d = (b[0] - a[0], b[1] - a[1])
             ln = math.hypot(*d) or 1.0
             n = (-d[1] / ln, d[0] / ln)
-            poly = [(a[0] + n[0] * f.r_base, a[1] + n[1] * f.r_base),
-                    (b[0] + n[0] * f.r_tip, b[1] + n[1] * f.r_tip),
-                    (b[0] - n[0] * f.r_tip, b[1] - n[1] * f.r_tip),
-                    (a[0] - n[0] * f.r_base, a[1] - n[1] * f.r_base)]
-            pygame.draw.polygon(s, col, poly)
+            pygame.draw.polygon(s, col, [
+                (a[0] + n[0] * f.r_base, a[1] + n[1] * f.r_base), (b[0] + n[0] * f.r_tip, b[1] + n[1] * f.r_tip),
+                (b[0] - n[0] * f.r_tip, b[1] - n[1] * f.r_tip), (a[0] - n[0] * f.r_base, a[1] - n[1] * f.r_base)])
             pygame.draw.circle(s, C_BG, a, 3)
 
         # Plunger
         ch = g.plunger_charge
         py0 = LANE_FLOOR_Y + 4 + 18 * ch
-        pygame.draw.rect(s, mix(C_WALL, C_FLIPPER, ch), pygame.Rect(PLUNGER_X - 8 + ox, py0, 16, H - py0))
-        pygame.draw.line(s, C_WALL_DIM, (LANE_X + ox, LANE_FLOOR_Y + oy), (520 + ox, LANE_FLOOR_Y + oy), 3)
+        pygame.draw.rect(s, mix(pal["wall"], pal["flipper"], ch), pygame.Rect(PLUNGER_X - 8 + ox, py0, 16, H - py0))
+        pygame.draw.line(s, pal["wall_dim"], (LANE_X + ox, LANE_FLOOR_Y + oy), (520 + ox, LANE_FLOOR_Y + oy), 3)
 
         # Partículas
         for p in g.particles:
             k = clamp(p.life / 0.5, 0.0, 1.0)
-            pygame.draw.circle(s, mix(C_FIELD, p.color, k), P((p.x, p.y)), 2 + 2 * k)
+            pygame.draw.circle(s, mix(pal["field"], p.color, k), P((p.x, p.y)), 2 + 2 * k)
 
-        # Bola con estela
+        # Bola
         b = g.ball
         if b.alive and b.held:
-            pygame.draw.circle(s, mix(C_BALL_SHADE, C_FIELD, 0.5), P((b.x, b.y)), b.r - 2)
+            pygame.draw.circle(s, mix(C_BALL_SHADE, pal["field"], 0.5), P((b.x, b.y)), b.r - 2)
         elif b.alive:
             n = len(b.trail)
             for i, (tx, ty) in enumerate(b.trail):
                 k = (i + 1) / (n + 1)
-                pygame.draw.circle(s, mix(C_FIELD, C_BALL_SHADE, k * 0.6), P((tx, ty)), b.r * k)
+                pygame.draw.circle(s, mix(pal["field"], C_BALL_SHADE, k * 0.6), P((tx, ty)), b.r * k)
             pygame.draw.circle(s, C_BALL_SHADE, P((b.x, b.y)), b.r)
             pygame.draw.circle(s, C_BALL, P((b.x - 2, b.y - 2)), b.r - 3)
+            if g.dragging:
+                pygame.draw.circle(s, pal["accent"], P((b.x, b.y)), b.r + 6, 2)
 
-        # Debug
         if g.debug:
             self.draw_debug(g, P)
-
-        # HUD
         self.draw_hud(g, blink)
 
-        # Flash
         if g.flash > 0:
             ov = pygame.Surface((W, H), pygame.SRCALPHA)
             ov.fill((255, 255, 255, int(120 * g.flash)))
@@ -1758,6 +2255,8 @@ class Renderer:
             pygame.draw.circle(s, C_DEBUG, P(a.c), a.R, 1)
         for se in t.sensors:
             pygame.draw.line(s, (0, 200, 255), P(se.a), P(se.b), 1)
+        for sp in t.spinners:
+            pygame.draw.line(s, (0, 200, 255), P(sp.a), P(sp.b), 1)
         for f in t.flippers:
             pygame.draw.line(s, C_DEBUG, P(f.pivot), P(f.tip()), 1)
             pygame.draw.circle(s, C_DEBUG, P(f.pivot), f.r_base, 1)
@@ -1766,41 +2265,55 @@ class Renderer:
         if b.alive:
             pygame.draw.circle(s, C_DEBUG, P((b.x, b.y)), b.r, 1)
             pygame.draw.line(s, C_DEBUG_V, P((b.x, b.y)), P((b.x + b.vx * 0.08, b.y + b.vy * 0.08)), 2)
-            self.text(f"v={b.speed():.0f} px/s  pos=({b.x:.0f},{b.y:.0f})  heat={g.tilt_heat:.2f}",
+            self.text(f"v={b.speed():.0f} px/s  pos=({b.x:.0f},{b.y:.0f})  heat={g.tilt_heat:.2f}  g={g.gravity_scale:.2f}",
                       self.font_small, C_DEBUG, (24, H - 22))
 
     def draw_hud(self, g: Game, blink: bool) -> None:
         s = self.surf
+        pal = g.pal
         pygame.draw.rect(s, C_BG, pygame.Rect(0, 0, W, HUD_H))
-        pygame.draw.line(s, C_WALL_DIM, (0, HUD_H - 1), (W, HUD_H - 1), 1)
+        pygame.draw.line(s, pal["wall_dim"], (0, HUD_H - 1), (W, HUD_H - 1), 1)
         self.text(f"{g.score:,}".replace(",", "."), self.font_big, C_TEXT, (18, 8))
-        self.text(f"RÉCORD {g.hiscore:,}".replace(",", "."), self.font_small, C_TEXT_DIM, (18, 44))
+        rec = f"RÉCORD {g.hiscore:,}".replace(",", ".") + ("   TRAMPA" if g.cheat else "")
+        self.text(rec, self.font_small, pal["accent"] if g.cheat else C_TEXT_DIM, (18, 44))
         if g.state in (State.PLAYING, State.BALL_LOST):
             self.text(f"BOLA {g.ball_number}", self.font, C_TEXT, (W - 18, 10), "topright")
             self.text(f"x{g.multiplier}  BONUS {g.bonus:,}".replace(",", "."), self.font_small, C_TEXT_DIM, (W - 18, 42), "topright")
-            if g.balls_left:
-                for i in range(g.balls_left):
-                    pygame.draw.circle(s, C_BALL, (W - 150 - i * 14, 20), 5)
+            for i in range(g.balls_left):
+                pygame.draw.circle(s, C_BALL, (W - 150 - i * 14, 20), 5)
             if g.time < g.ball_save_until and g.ball.alive and not g.ball.in_lane() and blink:
-                self.text("BALL SAVE", self.font_small, C_LIGHT_ON, (W / 2, 50), "center")
+                self.text("BALL SAVE", self.font_small, pal["light_on"], (W / 2, 50), "center")
             if g.tilt:
-                self.text("TILT", self.font_big, C_BUMPER, (W / 2, HUD_H / 2 - 4), "center")
-        if g.state is State.ATTRACT:
-            self.text("PYNBALL", self.font_title, C_FLIPPER, (W / 2, 520), "center")
-            self.text("un pinball en un fichero", self.font, C_TEXT_DIM, (W / 2, 580), "center")
+                self.text("TILT", self.font_big, pal["bumper"], (W / 2, HUD_H / 2 - 4), "center")
+        if g.state in (State.ATTRACT, State.GAME_OVER):
+            m = g.machine
+            panel = pygame.Surface((W, 320), pygame.SRCALPHA)
+            panel.fill((*C_BG, 215))
+            s.blit(panel, (0, 440))
+            pygame.draw.line(s, pal["wall_dim"], (20, 440), (520, 440), 1)
+            pygame.draw.line(s, pal["wall_dim"], (20, 760), (520, 760), 1)
+            if g.state is State.GAME_OVER:
+                self.text("GAME OVER", self.font_title, pal["bumper"], (PF_MID, 500), "center")
+                self.text(m.name, self.font, C_TEXT_DIM, (PF_MID, 560), "center")
+            else:
+                self.text(m.name, self.font_title, pal["flipper"], (PF_MID, 500), "center")
+                self.text(m.subtitle, self.font, C_TEXT_DIM, (PF_MID, 560), "center")
+            self.text(f"<  máquina {g.machine_index + 1} de {len(MACHINES)}  >   (flippers para cambiar)",
+                      self.font_small, C_TEXT_DIM, (PF_MID, 592), "center")
             if blink:
-                self.text("PULSA R PARA JUGAR", self.font, C_TEXT, (W / 2, 660), "center")
-            self.text("Shift / Z / flechas = flippers   Espacio = lanzar   X C V = nudge",
-                      self.font_small, C_TEXT_DIM, (W / 2, 720), "center")
-            self.text("M = música   F1 = debug   P = pausa", self.font_small, C_TEXT_DIM, (W / 2, 744), "center")
-        if g.state is State.GAME_OVER:
-            self.text("GAME OVER", self.font_title, C_BUMPER, (W / 2, 520), "center")
-            if blink:
-                self.text("PULSA R", self.font, C_TEXT, (W / 2, 600), "center")
+                self.text("PULSA R O ENTER PARA JUGAR", self.font, C_TEXT, (PF_MID, 650), "center")
+            self.text("Shift / Z / flechas = flippers   Espacio = lanzar   X C V = golpes",
+                      self.font_small, C_TEXT_DIM, (PF_MID, 712), "center")
+            self.text("M = música   F1 = debug   P = pausa", self.font_small, C_TEXT_DIM, (PF_MID, 736), "center")
         if g.message and g.time < g.message_until and g.state in (State.PLAYING, State.BALL_LOST):
-            self.text(g.message, self.font_big, C_LIGHT_ON, (PF_MID, 760), "center")
+            self.text(g.message, self.font_big, pal["light_on"], (PF_MID, 760), "center")
+        elif g.message and g.time < g.message_until and g.cheat:
+            self.text(g.message, self.font, pal["accent"], (PF_MID, 790), "center")
+        if g.cheat and g.state is State.PLAYING:
+            self.text("F2 gravedad  F3 plomada  F4 bola  F5 puntos  F6 lento  F7 bola al ratón  ratón arrastra",
+                      self.font_small, pal["accent"], (PF_MID, H - 10), "center")
         if g.paused:
-            self.text("PAUSA", self.font_big, C_TEXT, (W / 2, 400), "center")
+            self.text("PAUSA", self.font_big, C_TEXT, (PF_MID, 400), "center")
 
 
 # =============================================================================
@@ -1809,7 +2322,8 @@ class Renderer:
 
 def main(argv: list[str]) -> int:
     if "--dump-sounds" in argv:
-        folder = argv[argv.index("--dump-sounds") + 1] if len(argv) > argv.index("--dump-sounds") + 1 else "sounds"
+        i = argv.index("--dump-sounds")
+        folder = argv[i + 1] if len(argv) > i + 1 else "sounds"
         n = Sounds(enabled=False).dump(folder)
         print(f"{n} ficheros WAV en {folder}/")
         return 0
@@ -1817,6 +2331,12 @@ def main(argv: list[str]) -> int:
     if headless:
         os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
         os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+    machine = 0
+    if "--machine" in argv:
+        try:
+            machine = int(argv[argv.index("--machine") + 1]) % len(MACHINES)
+        except (IndexError, ValueError):
+            machine = 0
     pygame.init()
     pygame.display.set_caption("pynball")
     flags = pygame.SCALED | pygame.RESIZABLE
@@ -1825,14 +2345,13 @@ def main(argv: list[str]) -> int:
     except pygame.error:
         screen = pygame.display.set_mode((W, H))
     sounds = Sounds(enabled="--mute" not in argv)
-    game = Game(sounds)
+    game = Game(sounds, machine)
     renderer = Renderer()
     clock = pygame.time.Clock()
     acc = 0.0
     frames = 0
     max_frames = 0
     if headless:
-        # --headless [N]: simula N frames sin ventana y sale
         try:
             max_frames = int(argv[argv.index("--headless") + 1])
         except (IndexError, ValueError):
@@ -1848,19 +2367,25 @@ def main(argv: list[str]) -> int:
                 if ev.type == pygame.QUIT:
                     return 0
                 if ev.type == pygame.KEYDOWN:
+                    game.text_input(getattr(ev, "unicode", ""))
                     game.key_down(ev.key)
                 elif ev.type == pygame.KEYUP:
                     game.key_up(ev.key)
+                elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                    game.mouse_down(ev.pos)
+                elif ev.type == pygame.MOUSEMOTION:
+                    game.mouse_move(ev.pos)
+                elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1:
+                    game.mouse_up(ev.pos)
             if headless:
                 dt = FIXED_DT
                 frames += 1
-                # bot tonto: pulsa los flippers cuando la bola baja cerca
                 b = game.ball
                 for f in game.table.flippers:
                     f.pressed = b.alive and b.y > 760 and b.vy > 0 and abs(b.x - f.pivot.x) < 120
                 if frames >= max_frames:
-                    print(f"headless ok: frames={frames} score={game.score} state={game.state.name} "
-                          f"ball=({b.x:.0f},{b.y:.0f}) v={b.speed():.0f}")
+                    print(f"headless ok: machine={game.machine.key} frames={frames} score={game.score} "
+                          f"state={game.state.name} ball=({b.x:.0f},{b.y:.0f}) v={b.speed():.0f}")
                     return 0
             if not game.paused:
                 acc += dt
@@ -1868,8 +2393,7 @@ def main(argv: list[str]) -> int:
                     game.update(FIXED_DT)
                     acc -= FIXED_DT
             blink = (pygame.time.get_ticks() // 400) % 2 == 0
-            frame = renderer.draw(game, blink)
-            screen.blit(frame, (0, 0))
+            screen.blit(renderer.draw(game, blink), (0, 0))
             pygame.display.flip()
     except SystemExit:
         return 0

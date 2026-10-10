@@ -15,7 +15,9 @@ python pynball.py
 
 **Es**
 
-- Un juego jugable: plunger, dos flippers, tres bumpers pop, dos slingshots, banco de dianas, banco de standups P-Y-N, tres carriles superiores con rollovers, agujero kickout, órbita, inlanes y outlanes, desagüe, 3 bolas, bola extra, skill shot, combos, ball save, tilt, puntuación y récord.
+- Un juego jugable con **tres máquinas** a elegir en la pantalla de inicio, cada una con su mesa, su paleta, su música y su récord. Todas comparten plunger, dos flippers, slingshots, inlanes, outlanes, bola extra, skill shot, combos, ball save, tilt y bonus; cada una pone encima sus bumpers, dianas, agujeros, spinner, kickbacks y lámparas.
+- Golpes a la máquina como en la vida real: lateral por los dos lados y desde abajo (el "bang back" que salva una bola del outlane), con plomada de tilt que se calienta y se enfría.
+- Un modo trampa oculto, como el "hidden test" de Space Cadet: se activa escribiendo una palabra, y mientras está activo no se guarda récord.
 - Un único `pynball.py` de ~1.300 líneas, sin assets externos. Sonido generado por síntesis, mesa definida como datos dentro del propio fichero.
 - Física propia: bola circular contra segmentos, arcos y flippers rotatorios con velocidad de superficie. Legible, determinista, sin dependencias.
 - Rápido: la simulación completa a 960 Hz consume ~1 % de un núcleo. Un minuto de juego se simula en medio segundo sin ventana.
@@ -49,6 +51,7 @@ Modo sin ventana para pruebas y CI:
 
 ```bash
 python pynball.py --headless 3000     # simula 3000 frames con un bot tonto y sale
+python pynball.py --machine 2         # arranca con la tercera máquina elegida
 python pynball.py --dump-sounds out/  # vuelca los 78 sonidos sintetizados a WAV
 python pynball.py --mute              # sin audio
 ```
@@ -66,6 +69,27 @@ python pynball.py --mute              # sin audio
 | Flipper (al pulsar) | Rota las luces de los carriles superiores (lane change) |
 | `M` | Música sí / no |
 | `←` / `→`, `Ctrl` | Alternativas para los flippers |
+| Flippers en la pantalla de inicio | Cambian de máquina. `R`, `Enter` o `Espacio` empiezan |
+
+### Golpes a la máquina
+
+`X` y `V` son golpes laterales: la bola recibe un impulso hacia ese lado y un poco hacia arriba. `C` es el golpe desde abajo: impulso vertical fuerte, pensado para el *bang back* cuando la bola cae por un outlane. Cada golpe calienta la plomada (el de abajo más); el calor se enfría solo. Pasado el aviso, el siguiente golpe es **TILT**: flippers muertos y bonus perdido hasta la bola siguiente. La corona de lámparas bajo el arco muestra cuánto calor llevas.
+
+### Trampas
+
+Escribe `trampa` con el teclado en cualquier momento. Aparece "MODO TRAMPA" y el récord deja de guardarse. Mientras está activo:
+
+| Tecla | Trampa |
+|---|---|
+| `F2` | Levantar la máquina: gravedad al 45 % |
+| `F3` | Atar la plomada: inmunidad al tilt |
+| `F4` | Bola de regalo |
+| `F5` | +10.000 puntos |
+| `F6` | Cámara lenta |
+| `F7` | La bola aparece bajo el ratón |
+| Ratón | Arrastra la bola y suéltala con velocidad |
+
+Volver a escribir `trampa` lo apaga y deja todo como estaba.
 | `R` | Nueva partida |
 | `F1` | Mostrar colisionadores y vectores de velocidad |
 | `P` | Pausa |
@@ -86,10 +110,10 @@ pynball.py
 ├── 3. Elementos de mesa (dataclasses con slots)
 │      Wall, Post, Arc, Sensor, Hole, Flipper
 ├── 4. Ball: posición, velocidad, bounce() con corrección posicional y reflexión
-├── 5. Table + build_table(): la mesa escrita a mano, lado izquierdo y su espejo
+├── 5. Table, Machine y las tres mesas: bastidor común + piezas reutilizables
 ├── 6. Physics.substep(): integración, broad-phase por AABB, contactos, eventos
 ├── 7. Synth + Sounds: síntesis modal y de solenoide, rodadura, música, paneo
-├── 8. Game: reglas, puntuación, timers, tilt, máquina de estados, entrada
+├── 8. Game: reglas, luces, trampas, golpes, máquina de estados, entrada
 ├── 9. Renderer: mesa, luces, bola con estela, partículas, HUD, modo debug
 └── 10. main(): bucle con acumulador de tiempo fijo, modo --headless
 ```
@@ -169,41 +193,53 @@ La mesa está inclinada ~6.5°. En 2D vista cenital eso es simplemente una grave
 
 ---
 
-## 6. La mesa
+## 6. Las mesas
 
-Definida en `build_table()` como lista de elementos, coordenadas en píxeles sobre un lienzo lógico de **540 × 960** (escalado a la ventana con `pygame.SCALED`). Nada de cargar ficheros: cambiar la mesa es editar Python. El lado derecho es el espejo del izquierdo respecto al eje del campo de juego (`mirror()`), así que cada elemento lateral se escribe una vez.
+Todas las mesas se dibujan sobre un lienzo lógico de **540 × 960** (escalado a la ventana con `pygame.SCALED`) y comparten el **bastidor** (`Table.frame()`): arco, carril de lanzamiento con puerta de un sentido, diagonales laterales, techos que cierran los huecos tras los bancos, postes, guías de inlane tangentes al flipper en reposo, slingshots y flippers. El lado derecho es el espejo del izquierdo respecto al eje del campo (`mirror()`).
+
+Encima, cada máquina coloca piezas de un pequeño catálogo: `top_lanes(n)`, `bumper()`, `hole()`, `side_bank()`, `spinner()`, `kickback()`, `ring_lamps()`, `meter_lamps()` y `lamp()`. Una máquina es una función de veinte líneas más una paleta y una progresión de acordes. Añadir una cuarta es copiar una de las tres.
+
+| Máquina | Lo que lleva |
+|---|---|
+| **PYNBALL** (la de siempre) | 3 carriles, 3 bumpers en triángulo, agujero a la izquierda, banco de dianas, standups P-Y-N, spinner en la órbita izquierda, kickback en el outlane izquierdo |
+| **NEBULOSA** | 4 carriles, rombo de 4 bumpers, dos agujeros bajo el arco, N-E-B a la izquierda y U-L-A a la derecha, spinner central, kickback en los dos outlanes, estrellas que parpadean |
+| **TABERNA** | 3 carriles, barril (agujero) central, campo de 23 pinchos tipo bagatela, un gran bumper abajo, dianas (botellas) y R-O-N, spinner a la derecha, kickback derecho, cartel de 5 luces |
 
 ```
    ┌──────────────────────────────┐
-   │   ╭────┬──┬──┬────╮       ║  │  ← arco, 3 carriles con rollovers, carril de lanzamiento (║)
-   │   │ ○                │  ⟋  ║  │  ← agujero kickout; puerta de un sentido a la salida del carril
-   │   │   (B)   (B)      │     ║  │  ← 3 bumpers pop
+   │   ╭────┬──┬──┬────╮       ║  │  ← arco, carriles con rollovers, carril de lanzamiento (║)
+   │   │ ○    · · ·    ○ │  ⟋  ║  │  ← agujeros; puerta de un sentido a la salida del carril
+   │   │   (B)   (B)      │     ║  │  ← bumpers
    │   │      (B)         │     ║  │
-   │   │ ▐              ▌ │     ║  │  ← banco de 3 dianas (izq) y 3 standups P-Y-N (der)
-   │   │ ▔              ▔ │     ║  │  ← techo que cierra el hueco tras cada banco
-   │   │ •  ◢        ◣  • │     ║  │  ← postes, slingshots; fuera de ellos, los outlanes
-   │   │  ╲            ╱  │     ║  │  ← guías de inlane, tangentes al flipper en reposo
+   │   │ ▐ ·   ═══    · ▌ │     ║  │  ← bancos de dianas / standups con flecha-lámpara; spinner
+   │   │ ▔     ⁞        ▔ │     ║  │  ← techos; medidor de combo
+   │   │ •  ◢        ◣  • │     ║  │  ← postes, slingshots; fuera, los outlanes con kickback (▮)
+   │   │▮ ╲            ╱ ▮│     ║  │  ← guías de inlane con lámparas
    │   │   ◣ ╱      ╲ ◢   │  ●  │  ← flippers; plunger
    │   │      ▽▽▽▽▽▽      │     │  ← desagüe
    └──────────────────────────────┘
 ```
 
-Elementos y puntuación:
+Elementos y puntuación (comunes a las tres):
 
 | Elemento | Puntos | Comportamiento |
 |---|---|---|
-| Bumper pop | 100 × combo | Kick radial de 650 px/s. Golpes seguidos sin tocar flipper suben el combo hasta x10 |
+| Bumper pop | 100 × combo | Kick radial de 650 px/s. Golpes seguidos sin tocar flipper suben el combo hasta x10; el medidor de lámparas lo enseña |
 | Slingshot | 50 | Kick de 520 px/s solo por la cara frontal y solo si la bola llega con velocidad |
-| Diana (banco izq.) | 500 | Se apaga al golpearla; las tres: 5000 y se rearman en 1 s |
-| Standup P-Y-N (der.) | 300 | Enciende su letra; las tres: 3000 |
-| Rollover superior | 250 | Enciende su luz; las tres: multiplicador +1 (máx. x5), después 10 000 |
+| Diana | 500 | Se apaga al golpearla; las tres: 5000 y se rearman en 1 s |
+| Standup con letra | 300 | Enciende su letra; completar la palabra: 3000 por banco y **enciende los kickbacks** |
+| Rollover superior | 250 | Enciende su luz; todos: multiplicador +1 (máx. x5), después 10 000 |
 | Skill shot | 5000 | Al lanzar parpadea un carril; si la bola entra por él en 4 s |
-| Agujero kickout | 1000 × visita | Captura la bola si pasa despacio, la retiene 1,2 s y la expulsa al inlane izquierdo |
-| Desagüe | — | Pierde bola, suma bonus × multiplicador |
+| Agujero kickout | 1000 × visita | Captura la bola si pasa despacio, la retiene 1,2 s y la expulsa |
+| Spinner | 100 por media vuelta | Gira según la velocidad con que lo cruzas y va frenando |
+| Kickback | 1000 | Si está encendido, devuelve al juego la bola que cae por ese outlane. Se apaga al usarse; el primero de cada partida va de regalo |
+| Desagüe | — | Pierde bola, suma bonus × multiplicador contado a golpes |
 
 Cada carril, diana y agujero suma además al **bonus** de la bola (1000, 1000, 500 y 2000 respectivamente).
 
----
+### Luces
+
+Las lámparas de inserto no tienen física: son un pequeño secuenciador (`Game.update_lamps`) con un patrón de fondo por estado y persecuciones temporales por evento. En la pantalla de inicio la corona del arco gira y las flechas parpadean; jugando, las flechas señalan lo que falta por golpear, la corona muestra el calor de tilt, el medidor sube con el combo, los kickbacks encendidos parpadean y las lámparas de inlane avisan del ball save. Un banco completo, un skill shot o una bola extra lanzan un barrido doble por la corona; el tilt apaga todo.
 
 ## 7. Reglas de partida
 
@@ -218,17 +254,18 @@ ATTRACT ──(R)──► PLAYING ──(bola al desagüe)──► BALL_LOST
 
 - 3 bolas por partida.
 - **Ball save**: los primeros 6 s tras lanzar, perder la bola la devuelve al plunger sin coste.
-- **Tilt**: cada nudge suma 1 de calor, que decae a 0,55/s. Por encima de 1,6 avisa; por encima de 2,5 apaga los flippers y el bonus hasta que la bola se pierde. Es el esquema de Space Cadet (`nudge_count`) con los números de flipper-zero-pinball.
+- **Tilt**: cada golpe suma 1 de calor (1,4 el de abajo), que decae a 0,55/s. Por encima de 1,6 avisa; por encima de 2,5 apaga los flippers y el bonus hasta que la bola se pierde. Es el esquema de Space Cadet (`nudge_count`) con los números de flipper-zero-pinball.
+- **Récords** por máquina en `~/.pynball_hiscore` (JSON; el formato antiguo de un entero se lee como récord de la primera máquina). En modo trampa no se escribe.
 - **Bonus**: al perder bola, `bonus × multiplicador` se añade y el bonus se reinicia. El multiplicador (1x-5x) se mantiene durante la partida.
 - **Extra ball** a los 50 000 puntos. Una por partida.
 - **Bola atascada**: si lleva 2,5 s casi quieta fuera del carril y sin ningún flipper pulsado, recibe un empujón aleatorio.
-- Récord guardado en `~/.pynball_hiscore` como un entero en texto plano. Si no se puede escribir, se ignora en silencio.
+- Si el fichero de récords no se puede escribir, se ignora en silencio.
 
 ---
 
 ## 8. Sonido
 
-Sin ficheros. Todo se sintetiza al arrancar con numpy en menos de 0,2 s: 78 buffers, tres variantes desafinadas de cada golpe para que no canse, paneo estéreo según la posición en la mesa, y volumen que sigue la velocidad de impacto.
+Sin ficheros. Todo se sintetiza al arrancar con numpy en menos de 0,2 s: 86 buffers, tres variantes desafinadas de cada golpe para que no canse, paneo estéreo según la posición en la mesa, y volumen que sigue la velocidad de impacto.
 
 **El modelo.** Un pinball suena a mecánica más electrónica, y las dos capas se sintetizan distinto:
 
@@ -240,7 +277,7 @@ Sin ficheros. Todo se sintetiza al arrancar con numpy en menos de 0,2 s: 78 buff
 | Campanas | Modal con parciales de campana (1 : 2 : 2,76 : 5,4 : 8,9) sobre pentatónica de La menor | Dianas, standups, rollovers, cuenta del bonus |
 | Combo | El bumper suena a solenoide y además a una nota: cada golpe seguido sube un grado de la escala | Bumpers |
 | Jingles | Acordes arpegiados con triángulo y octava | Inicio, banco completo, multiplicador, skill shot, extra ball, game over |
-| Música | Bucle de 4 compases a 112 BPM (Am F C G): bajo de sierra filtrado, arpegio de triángulo, bombo, caja y charles. Lo que sobresale del final se pliega al principio | Canal reservado, `M` para apagar |
+| Música | Bucle de 4 compases por máquina (112 BPM Am F C G con arpegio de triángulo; 96 BPM Em C G D con seno; 132 BPM C F G C con cuadrada): bajo de sierra filtrado, bombo, caja y charles. Lo que sobresale del final se pliega al principio; cambiar de máquina lo regenera en 0,1 s | Canal reservado, `M` para apagar |
 
 **Detalles que se oyen.** El plunger hace clic de trinquete cada octavo de carga. Al perder bola, el bonus se cuenta a golpes con campanas ascendentes, como una electromecánica. El tilt es un zumbido troceado. Si el flipper golpea la bola, suena un "whack" distinto del clack del solenoide, más fuerte cuanto más rápido.
 
@@ -300,6 +337,7 @@ TILT_LIMIT        = 2.5      # calor acumulado; cada nudge suma 1, decae 0,55/s
 ## 12. Lo que queda fuera a propósito
 
 - Multibola. Dobla la complejidad de reglas por poco beneficio didáctico.
+- Un editor de mesas. Las tres máquinas son funciones de veinte líneas sobre el mismo catálogo de piezas; ese es el editor.
 - Rampas con cambio de plano (bola "por encima" de otros elementos). Space Cadet lo hace con capas; aquí sería ruido.
 - Mesas cargables desde fichero. Si la mesa es Python, el editor de mesas es tu editor de texto.
 - Física continua con tiempo exacto de impacto. Los substeps bastan y se leen.
